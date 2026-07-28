@@ -1,8 +1,16 @@
 # BLACKSITE
 
+### ▶ [Play it in your browser](https://javieranta.github.io/blacksite/)
+
 A first-person shooter built in Three.js / WebGL2, with **zero external assets** —
 every texture, mesh, animation and sound is generated procedurally in code at
 load time. No downloaded models, no sample libraries, no licensing surface.
+
+> **First load takes 30–60 seconds.** Roughly 115 shader programs compile from
+> cold, and every texture in the game is generated at load time rather than
+> downloaded. Subsequent loads are much faster once the shader cache is warm.
+> Needs a desktop browser with WebGL2 — Chrome or Edge give the best results.
+> Click the canvas to capture the mouse; press Esc to release it.
 
 ![Combat](docs/screenshots/05-round6-hud.png)
 
