@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>BLACKSITE — material forge preview</title>
+  <style>
+    html, body { margin: 0; background: #101214; overflow: hidden; font: 12px/1.3 monospace; }
+    #labels { position: fixed; inset: 0; pointer-events: none; color: #dfe4e8; text-shadow: 0 1px 2px #000; }
+    #labels span { position: absolute; transform: translate(-50%, 0); white-space: nowrap; }
+  </style>
+</head>
+<body>
+<div id="labels"></div>
+<script type="module">
+/**
+ * OWNER: material-forge agent. A dev-only harness — it is not part of the game
+ * bundle and nothing imports it. It exists so the material library can be
+ * judged at close range in isolation, with the same world-projected UVs the
+ * level uses, without waiting on the rest of the renderer to boot.
+ *
+ *   http://127.0.0.1:5180/src/render/material/preview.html?tod=overcast&zoom=1
+ */
+import * as THREE from 'three';
+import { MaterialForge } from '../MaterialForge.js';
+
+const q = new URLSearchParams(location.search);
+const tod = q.get('tod') ?? 'golden';
+const only = q.get('only')?.split(',');
+const dist = parseFloat(q.get("dist") ?? "1.0");
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(1);
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.AgXToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(46, innerWidth / innerHeight, 0.02, 200);
+
+/* ---- environment: a procedural sky gradient, PMREM'd. No external assets. ---- */
+function envTexture(top, horizon, ground) {
+  const W = 128, H = 64;
+  const data = new Float32Array(W * H * 4);
+  for (let y = 0; y < H; y++) {
+    const t = 1 - y / (H - 1);                 // 1 = zenith
+    const c = new THREE.Color();
+    if (t > 0.5) c.copy(top).lerp(horizon, Math.pow((1 - t) * 2, 0.7));
+    else c.copy(horizon).lerp(ground, Math.pow(1 - t * 2, 0.6));
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      data[i] = c.r; data[i + 1] = c.g; data[i + 2] = c.b; data[i + 3] = 1;
+    }
+  }
+  const t = new THREE.DataTexture(data, W, H, THREE.RGBAFormat, THREE.FloatType);
+  t.mapping = THREE.EquirectangularReflectionMapping;
+  t.needsUpdate = true;
+  return t;
+}
+
+// Azimuths deliberately sit in the +Z quadrant so the sun rakes across the front
+// face of each swatch. A sun behind the panel makes every normal map look flat.
+const RIGS = {
+  golden:   { top: 0x3d6fa8, hor: 0xffb877, gnd: 0x4a3a2c, sun: 0xffa955, int: 3.4, env: 0.9, el: 14, az: 44 },
+  midday:   { top: 0x4d86c8, hor: 0xcfe0ee, gnd: 0x6a6255, sun: 0xfffaf0, int: 5.2, env: 1.0, el: 52, az: 28 },
+  overcast: { top: 0x9fb0c2, hor: 0xc9d2dc, gnd: 0x6f7168, sun: 0xc9d2dc, int: 1.7, env: 1.4, el: 40, az: 36 },
+};
+const rig = RIGS[tod] ?? RIGS.golden;
+
+const pmrem = new THREE.PMREMGenerator(renderer);
+const eq = envTexture(new THREE.Color(rig.top), new THREE.Color(rig.hor), new THREE.Color(rig.gnd));
+scene.environment = pmrem.fromEquirectangular(eq).texture;
+scene.environmentIntensity = rig.env;
+scene.background = new THREE.Color(rig.hor).multiplyScalar(0.55);
+eq.dispose();
+
+const sun = new THREE.DirectionalLight(rig.sun, rig.int);
+const el = THREE.MathUtils.degToRad(rig.el), az = THREE.MathUtils.degToRad(rig.az);
+sun.position.set(Math.cos(el) * Math.sin(az) * 40, Math.sin(el) * 40, Math.cos(el) * Math.cos(az) * 40);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -14; sun.shadow.camera.right = 14;
+sun.shadow.camera.top = 14; sun.shadow.camera.bottom = -14;
+sun.shadow.camera.far = 90;
+sun.shadow.bias = -0.0004;
+scene.add(sun);
+
+/* ---- forge ---- */
+const forge = new MaterialForge();
+forge.init({
+  renderer,
+  quality: { resolutionScale: 1.0 },
+  scene,
+  camera,
+});
+
+/* ---- world-space UV projection, matching GeoKit.projectUV ---- */
+function projectUV(geo, tile = 2.0) {
+  geo.computeVertexNormals();
+  const p = geo.attributes.position, n = geo.attributes.normal;
+  const uv = new Float32Array(p.count * 2);
+  const inv = 1 / tile;
+  const m = geo.userData.worldMatrix ?? new THREE.Matrix4();
+  const v = new THREE.Vector3(), nv = new THREE.Vector3();
+  const nm = new THREE.Matrix3().getNormalMatrix(m);
+  for (let i = 0; i < p.count; i++) {
+    v.fromBufferAttribute(p, i).applyMatrix4(m);
+    nv.fromBufferAttribute(n, i).applyMatrix3(nm).normalize();
+    const ax = Math.abs(nv.x), ay = Math.abs(nv.y), az2 = Math.abs(nv.z);
+    let u, vv;
+    if (ay >= ax && ay >= az2) { u = v.x; vv = v.z; }
+    else if (ax >= az2) { u = v.z; vv = v.y; }
+    else { u = v.x; vv = v.y; }
+    uv[i * 2] = u * inv; uv[i * 2 + 1] = vv * inv;
+  }
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setAttribute('uv1', new THREE.BufferAttribute(uv.slice(), 2));
+  return geo;
+}
+
+/* ---- swatch layout: a wall panel, a floor slab, a pipe and a sphere ---- */
+const names = (only ?? forge.names()).slice(0, 32);
+const COLS = parseInt(q.get('cols') ?? '0', 10) || names.length;
+const PITCH = 3.2;
+const labels = document.getElementById('labels');
+const tags = [];
+
+names.forEach((name, k) => {
+  const cx = (k % COLS - (COLS - 1) / 2) * PITCH;
+  const cz = (Math.floor(k / COLS) - 0.5) * PITCH * 1.15;
+  const mat = forge.get(name);
+  const g = new THREE.Group();
+
+  // back wall panel, 2.6 x 2.2 m
+  const wall = new THREE.BoxGeometry(2.6, 2.2, 0.3, 2, 2, 1);
+  wall.userData.worldMatrix = new THREE.Matrix4().makeTranslation(cx, 1.1, cz - 1.0);
+  const wallMesh = new THREE.Mesh(projectUV(wall), mat);
+  wallMesh.position.set(cx, 1.1, cz - 1.0);
+  wallMesh.castShadow = wallMesh.receiveShadow = true;
+  g.add(wallMesh);
+
+  // floor slab in front of it
+  const floor = new THREE.BoxGeometry(2.9, 0.24, 1.8, 2, 1, 2);
+  floor.userData.worldMatrix = new THREE.Matrix4().makeTranslation(cx, -0.12, cz + 0.1);
+  const floorMesh = new THREE.Mesh(projectUV(floor), mat);
+  floorMesh.position.set(cx, -0.12, cz + 0.1);
+  floorMesh.receiveShadow = true;
+  g.add(floorMesh);
+
+  // a 0.34 m pipe and a 0.34 m sphere for the specular read
+  const pipe = new THREE.CylinderGeometry(0.17, 0.17, 2.2, 28, 1);
+  const pm = new THREE.Matrix4().compose(
+    new THREE.Vector3(cx, 0.55, cz + 0.55),
+    new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, Math.PI / 2)),
+    new THREE.Vector3(1, 1, 1),
+  );
+  pipe.userData.worldMatrix = pm;
+  const pipeMesh = new THREE.Mesh(projectUV(pipe), mat);
+  pipeMesh.applyMatrix4(pm);
+  pipeMesh.castShadow = pipeMesh.receiveShadow = true;
+  g.add(pipeMesh);
+
+  const ball = new THREE.SphereGeometry(0.30, 40, 24);
+  const bm = new THREE.Matrix4().makeTranslation(cx + 0.95, 0.32, cz + 0.7);
+  ball.userData.worldMatrix = bm;
+  const ballMesh = new THREE.Mesh(projectUV(ball), mat);
+  ballMesh.applyMatrix4(bm);
+  ballMesh.castShadow = ballMesh.receiveShadow = true;
+  g.add(ballMesh);
+
+  scene.add(g);
+  const span = document.createElement('span');
+  span.textContent = `${name}  ${forge.uvScale(name).toFixed(2)}m`;
+  labels.appendChild(span);
+  tags.push({ span, pos: new THREE.Vector3(cx, 2.45, cz - 1.0) });
+});
+
+/* ---- camera framing: fit the whole grid, then let ?close= dive on one cell ---- */
+const rows = Math.ceil(names.length / COLS);
+const width = COLS * PITCH;
+const depth = rows * PITCH * 1.15;
+const hHalf = Math.atan(Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * camera.aspect);
+const fit = (width * 0.5 + 0.4) / Math.tan(hHalf);
+camera.position.set(0, 1.35 + rows * 0.75, depth * 0.5 + fit * dist);
+camera.lookAt(0, 0.85, -0.2);
+if (q.get('close')) {
+  const i = parseInt(q.get('close'), 10) || 0;
+  const cx = (i % COLS - (COLS - 1) / 2) * PITCH;
+  const cz = (Math.floor(i / COLS) - 0.5) * PITCH * 1.15;
+  camera.fov = 40;
+  camera.position.set(cx + 0.4, 1.05, cz + 1.55);
+  camera.lookAt(cx, 0.85, cz - 0.9);
+}
+camera.updateProjectionMatrix();
+
+const proj = new THREE.Vector3();
+function placeLabels() {
+  for (const t of tags) {
+    proj.copy(t.pos).project(camera);
+    t.span.style.left = `${(proj.x * 0.5 + 0.5) * innerWidth}px`;
+    t.span.style.top = `${(-proj.y * 0.5 + 0.5) * innerHeight}px`;
+    t.span.style.display = proj.z > 1 ? 'none' : 'block';
+  }
+}
+
+renderer.render(scene, camera);
+placeLabels();
+window.__ready = true;
+window.__preview = { forge, scene, camera, renderer };
+</script>
+</body>
+</html>

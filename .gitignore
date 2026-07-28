@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.vite/
+
+# Iteration screenshots — ~838MB of per-agent working shots.
+# The curated progression set lives in docs/screenshots/ and IS committed.
+tools/out/
+
+*.log
+.DS_Store
+Thumbs.db
+
+# Agent scratch
+.claude-flow/
+tools/_*.mjs

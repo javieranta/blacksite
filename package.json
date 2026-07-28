@@ -1,0 +1,24 @@
+{
+  "name": "blacksite",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "BLACKSITE — a AAA-grade first-person shooter built in Three.js/WebGL2",
+  "scripts": {
+    "dev": "vite --port 5180",
+    "build": "vite build",
+    "preview": "vite preview --port 5180",
+    "shoot": "node tools/shoot.mjs",
+    "verify": "node tools/verify.mjs"
+  },
+  "dependencies": {
+    "n8ao": "^1.9.4",
+    "postprocessing": "^6.36.4",
+    "three": "^0.180.0",
+    "three-mesh-bvh": "^0.9.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0",
+    "vite": "^6.0.0"
+  }
+}
