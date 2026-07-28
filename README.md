@@ -115,9 +115,11 @@ registry and a frozen event bus.
 
 ## Documentation
 
+- **[docs/Resuming.md](docs/Resuming.md)** — start here if you are picking this up cold
 - **[CONTRACT.md](CONTRACT.md)** — the binding rules for working in this codebase
 - **[docs/Architecture.md](docs/Architecture.md)** — runtime topology, systems, seams
 - **[docs/Status.md](docs/Status.md)** — full review, open defects, fix priority
+- **[tools/workflows/](tools/workflows/)** — the agent briefs and critic prompts that built it
 
 ## Constraints
 
