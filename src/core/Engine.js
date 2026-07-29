@@ -30,7 +30,12 @@ export class Engine {
       powerPreference: 'high-performance',
       logarithmicDepthBuffer: false,
     });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // Boot at 1:1. AdaptiveQuality raises this only if the measured frame time
+    // proves the hardware can afford it. The previous min(devicePixelRatio, 2)
+    // drove a ~9-pass post chain at 3840x2160 on a high-DPI display before
+    // anything had measured whether that was survivable — it was not (600ms
+    // frames on integrated graphics).
+    this.renderer.setPixelRatio(1);
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.AgXToneMapping;
@@ -67,9 +72,14 @@ export class Engine {
     this.frame = 0;
     this._accumulator = 0;
 
-    this.stats = { fps: 0, ms: 0, drawCalls: 0, triangles: 0, programs: 0 };
+    this.stats = {
+      fps: 0, ms: 0, frameMs: 0, worstMs: 0, cpuMs: 0,
+      drawCalls: 0, triangles: 0, programs: 0,
+    };
     this._fpsAccum = 0;
     this._fpsFrames = 0;
+    this._worstInterval = 0;
+    this._lastFrameStart = 0;
 
     /** Shared context handed to every system. */
     this.ctx = {
@@ -158,15 +168,42 @@ export class Engine {
     }
 
     this.frame++;
-    const ms = performance.now() - t0;
-    this._fpsAccum += dt;
-    this._fpsFrames++;
-    if (this._fpsAccum >= 0.5) {
-      this.stats.fps = Math.round(this._fpsFrames / this._fpsAccum);
-      this._fpsAccum = 0;
-      this._fpsFrames = 0;
+
+    // Frame timing must come from WALL CLOCK, not from `dt`.
+    //
+    // `dt` is clamped to 0.1s above and zeroed while paused, so deriving fps
+    // from it puts a hard floor of 10fps on the counter — a real 5fps reported
+    // as 10, and a stall reported as healthy. And `performance.now() - t0`
+    // measures only the JavaScript spent inside this function; GPU work is
+    // asynchronous, so on a GPU-bound frame it reads ~2ms while the display is
+    // updating at 200ms. Both numbers flattered the engine badly enough to
+    // hide a genuine unplayability problem.
+    //
+    // The interval between successive frame starts is the only figure that
+    // reflects what the player actually sees. cpuMs is kept separately, and is
+    // only meaningful next to frameMs: cpuMs ≈ frameMs means CPU-bound,
+    // cpuMs << frameMs means GPU-bound.
+    const now = performance.now();
+    const interval = this._lastFrameStart ? now - this._lastFrameStart : 0;
+    this._lastFrameStart = now;
+
+    if (interval > 0) {
+      this._fpsAccum += interval;
+      this._fpsFrames++;
+      // Track the worst frame in the window — a median of 16ms with a 120ms
+      // spike is a stutter the average would hide entirely.
+      if (interval > this._worstInterval) this._worstInterval = interval;
+      if (this._fpsAccum >= 500) {
+        this.stats.fps = Math.round((this._fpsFrames * 1000) / this._fpsAccum);
+        this.stats.frameMs = +(this._fpsAccum / this._fpsFrames).toFixed(2);
+        this.stats.worstMs = +this._worstInterval.toFixed(2);
+        this._fpsAccum = 0;
+        this._fpsFrames = 0;
+        this._worstInterval = 0;
+      }
     }
-    this.stats.ms = ms;
+    this.stats.cpuMs = +(now - t0).toFixed(2);
+    this.stats.ms = this.stats.frameMs;
     this.stats.drawCalls = this.renderer.info.render.calls;
     this.stats.triangles = this.renderer.info.render.triangles;
     this.stats.programs = this.renderer.info.programs?.length ?? 0;

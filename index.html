@@ -24,6 +24,26 @@
       #boot .bar { width: 320px; height: 2px; background: #1a2230; overflow: hidden; }
       #boot .bar i { display: block; height: 100%; width: 0%; background: #d8a24a; transition: width .25s ease; }
       #boot .msg { font-size: 11px; opacity: .55; }
+
+      /* Surfaced when the browser is rendering on an integrated GPU. */
+      #gpu-warning {
+        position: fixed; left: 50%; top: 22px; transform: translateX(-50%);
+        z-index: 200; max-width: 620px; display: flex; flex-direction: column; gap: 7px;
+        padding: 15px 20px; background: rgba(14, 18, 24, .94); color: #cfd8e3;
+        border: 1px solid #d8a24a; border-left-width: 3px;
+        font-size: 12px; line-height: 1.55; letter-spacing: .02em;
+      }
+      #gpu-warning strong {
+        color: #e8b45f; font-size: 11px; letter-spacing: .22em; text-transform: uppercase;
+      }
+      #gpu-warning .gpu { font-family: ui-monospace, Consolas, monospace; font-size: 11px; opacity: .62; }
+      #gpu-warning .fix { color: #9fd2a8; }
+      #gpu-warning button {
+        align-self: flex-start; margin-top: 3px; padding: 5px 13px; cursor: pointer;
+        background: transparent; color: #cfd8e3; border: 1px solid #35404e;
+        font: inherit; font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+      }
+      #gpu-warning button:hover { border-color: #d8a24a; color: #e8b45f; }
     </style>
   </head>
   <body>

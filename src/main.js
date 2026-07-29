@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { Engine } from './core/Engine.js';
 import { Input } from './core/Input.js';
 import { QUALITY, TIME_OF_DAY } from './core/Constants.js';
+import { AdaptiveQuality } from './core/AdaptiveQuality.js';
 
 import { MaterialForge } from './render/MaterialForge.js';
 import { Sky } from './render/Sky.js';
@@ -52,6 +53,9 @@ engine.register(new EnemyAI());         // combatants
 engine.register(new AudioEngine());     // spatial audio
 engine.register(new HUD());             // reticle, health, ammo
 engine.register(new PostFX());          // owns the frame — must be last renderer
+// After PostFX: it emits 'render:quality' from init(), and PostFX must already
+// be subscribed for the opening preset to land.
+engine.register(new AdaptiveQuality());  // measures real frame time, moves the preset
 
 // Clears per-frame input edges after every system has observed them.
 engine.register({
@@ -105,6 +109,9 @@ if (params.has('vm')) window.__blacksite.setViewmodel(flag('vm', true));
 if (flag('ads')) engine.bus.emit('weapon:force', { ads: true });
 if (flag('fire')) engine.bus.emit('weapon:force', { firing: true });
 if (flag('freeze')) engine.frozen = true;
+
+// The integrated-graphics banner is raised by AdaptiveQuality itself, at the
+// moment it detects the adapter — see src/core/AdaptiveQuality.js.
 
 engine.start();
 
