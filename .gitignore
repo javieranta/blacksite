@@ -13,3 +13,5 @@ Thumbs.db
 # Agent scratch
 .claude-flow/
 tools/_*.mjs
+.props7tmp/
+.*tmp/
