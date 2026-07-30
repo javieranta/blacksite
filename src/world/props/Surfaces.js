@@ -46,6 +46,7 @@ export class SurfaceProbe {
     this._fallback = new THREE.Raycaster();
     this._occupancy = new Map();
     this._cell = 1.5;
+    this._near = {};
   }
 
   /** Snapshot the world into a private, position-only BVH. */
@@ -210,6 +211,25 @@ export class SurfaceProbe {
     // indoors, which is how interiors get dressed without asking the level.
     if (best) { best.hits = hits; best.rays = count; }
     return best;
+  }
+
+  /**
+   * Distance from a point to the nearest world surface, capped at `maxDist`.
+   *
+   * This is the primitive the float sweep needs and could not previously
+   * express: "is this prop actually touching anything?" is a proximity question,
+   * not a ray question. Six rays from a box centre answer it only for props that
+   * happen to be axis-aligned with their support; a closest-point query answers
+   * it for a cable end, a bent pipe, a sign corner or a tilted plate as well.
+   *
+   * @returns {number} metres, or Infinity if nothing is within `maxDist`
+   */
+  nearest(x, y, z, maxDist = 0.25) {
+    if (!this.ok || !this.bvh) return Infinity;
+    _v2.set(x, y, z);
+    const res = this.bvh.closestPointToPoint(_v2, this._near, 0, maxDist);
+    if (!res || res.distance > maxDist) return Infinity;
+    return res.distance;
   }
 
   /** Ceiling above a point (for hanging cables, ducts, lamps). */

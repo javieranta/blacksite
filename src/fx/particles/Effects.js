@@ -31,6 +31,10 @@ const C = {
   ember: lin(0xff6a18),
   smokeWarm: lin(0xa89c8c),
   smokeCool: lin(0x8d949c),
+  // Smoke still inside the flash envelope: lit by the discharge, not by the
+  // sky. It has to start here and cool through smokeWarm to smokeCool, which is
+  // what makes a puff look like it was born hot rather than sprayed grey.
+  smokeLit: lin(0xffb072),
   smokeDark: lin(0x2e2c2a),
   smokeMid: lin(0x565452),
   dust: lin(0xbfb4a2),
@@ -212,42 +216,75 @@ const _refl = new Float32Array(3);
  */
 export const EFFECTS = {
   // ── weapon ────────────────────────────────────────────────────────────────
+  /**
+   * A discharge is not one card. It is a compact incandescent core at the bore,
+   * two or three flame petals rolled at random so no two shots are the same
+   * shape, unburnt powder thrown forward as motion-stretched sparks, and a puff
+   * of smoke that is born lit by the flash and cools to grey over half a second.
+   * The light it casts on the world is not here — `Particles._onFire` fires a
+   * real pooled point light, because no amount of additive billboard makes the
+   * ground brighter.
+   *
+   * Deliberately SMALL: this sits ~0.5 m from the lens, so every centimetre of
+   * sprite is a large number of screen pixels and a large fill-rate bill.
+   */
   muzzle(E, o) {
     const { px, py, pz } = o;
     const dx = o.dx; const dy = o.dy; const dz = o.dz;
     const s = o.scale;
 
-    // Hot core: two frames of life, absurdly bright, gone before you see a shape.
+    E.basis(dx, dy, dz);
+
+    // Incandescent core at the bore — small, white-hot, three frames of life.
+    E.reset(SPRITE.GLOW);
+    E.at(px + dx * 0.02, py + dy * 0.02, pz + dz * 0.02);
+    E.size(0.055 * s, 0.085 * s, 0.030 * s);
+    E.ramp(C.hotWhite, 1, C.hotWhite, 0.95, C.flash, 0);
+    E.P.life = 0.030; E.P.bright = 46; E.P.soft = 0.05;
+    E.fx();
+
+    // The starburst that reads as "muzzle flash" at a glance. Rolled per shot
+    // and kept smaller than the core-plus-petals envelope so it decorates the
+    // shape rather than being the whole of it.
     E.reset(SPRITE.STAR);
     E.at(px, py, pz);
-    E.size(0.10 * s, 0.19 * s, 0.07 * s);
-    E.ramp(C.hotWhite, 1, C.flash, 0.9, C.fire, 0);
-    E.P.life = 0.045; E.P.bright = 42; E.P.soft = 0.05;
+    E.size(0.062 * s, 0.115 * s, 0.045 * s);
+    E.ramp(C.hotWhite, 1, C.flash, 0.85, C.fire, 0);
+    E.P.life = 0.038; E.P.bright = 22; E.P.soft = 0.05;
     E.P.rot = E.rnd() * 6.283;
     E.fx();
 
-    E.basis(dx, dy, dz);
-    for (let i = 0; i < 3; i++) {
-      E.reset(SPRITE.GLOW);
-      E.at(px, py, pz);
-      E.cone(0.5, E.range(1.2, 4.0) * s);
-      E.size(0.05 * s, 0.13 * s, 0.03 * s);
-      E.ramp(C.hotWhite, 1, C.fire, 0.8, C.fireDeep, 0);
-      E.P.life = E.range(0.05, 0.085); E.P.bright = 22; E.P.soft = 0.05;
-      E.P.drag = 6;
+    // 2-3 flame petals: tongues of burning propellant leaving the crown. They
+    // start a few centimetres down the bore line and are pushed forward hard, so
+    // they extend PAST the star's envelope — that asymmetric reach along the
+    // barrel axis is the difference between a discharge and a sticker. Motion
+    // stretch elongates each one along its own velocity, so no two shots are the
+    // same silhouette.
+    const petals = 2 + ((E.rnd() * 2) | 0);
+    for (let i = 0; i < petals; i++) {
+      const along = E.range(0.030, 0.110);
+      E.reset(SPRITE.STREAK);
+      E.at(px + dx * along, py + dy * along, pz + dz * along);
+      E.cone(E.range(0.10, 0.45), E.range(4.0, 11.0) * s);
+      const w = E.range(0.040, 0.075) * s;
+      E.size(w, w * 1.5, w * 0.35);
+      E.ramp(C.hotWhite, 1, C.fire, 0.85, C.fireDeep, 0);
+      E.P.life = E.range(0.040, 0.075); E.P.bright = E.range(15, 24);
+      E.P.stretch = E.range(0.020, 0.036); E.P.soft = 0.05; E.P.drag = 9;
+      E.P.rot = E.rnd() * 6.283;
       E.fx();
     }
 
-    // Unburnt powder thrown out of the barrel.
+    // Unburnt powder thrown forward out of the barrel.
     const sparks = 7 + ((E.rnd() * 4) | 0);
     for (let i = 0; i < sparks; i++) {
       E.reset(SPRITE.STREAK);
       E.at(px, py, pz);
-      E.cone(0.42, E.range(5, 17) * s);
+      E.cone(0.38, E.range(6, 19) * s);
       E.size(0.020 * s, 0.016 * s, 0.004 * s);
       E.ramp(C.hotWhite, 1, C.ember, 0.9, C.fireDeep, 0);
-      E.P.life = E.range(0.10, 0.30); E.P.bright = 14; E.P.stretch = 0.022;
-      E.P.grav = 0.55; E.P.drag = 3.4; E.P.soft = 0.08;
+      E.P.life = E.range(0.10, 0.32); E.P.bright = 14; E.P.stretch = 0.024;
+      E.P.grav = 0.55; E.P.drag = 3.2; E.P.soft = 0.08;
       E.fx();
     }
 
@@ -263,16 +300,17 @@ export const EFFECTS = {
     }
 
     // The smoke is what actually sells a discharge — it lingers, it drifts, and
-    // it is the only part still on screen by the next round.
-    // Small, short-lived and moving *away* — muzzle smoke sits half a metre
-    // from the lens, where a big sprite is a full-screen fill-rate bill.
+    // it is the only part still on screen by the next round. Small, short-lived
+    // and moving *away*: muzzle smoke sits half a metre from the lens, where a
+    // big sprite is a full-screen fill-rate bill. It starts inside the flash
+    // envelope (smokeLit) and cools through warm to grey as it expands.
     for (let i = 0; i < 3; i++) {
       E.reset(SPRITE.WISP);
       E.at(px + dx * 0.16, py + dy * 0.16, pz + dz * 0.16);
       E.cone(0.42, E.range(2.4, 5.0) * s);
       E.P.vy += E.range(0.15, 0.6);
-      E.size(0.030 * s, 0.10 * s, 0.17 * s);
-      E.ramp(C.smokeWarm, 0.36, C.smokeCool, 0.20, C.smokeCool, 0);
+      E.size(0.030 * s, 0.11 * s, 0.20 * s);
+      E.ramp(C.smokeLit, 0.50, C.smokeWarm, 0.26, C.smokeCool, 0);
       E.P.life = E.range(0.28, 0.55); E.P.drag = 2.4; E.P.turb = 1.9;
       E.P.grav = -0.05; E.P.spin = E.sym(1.6); E.P.soft = 0.5;
       E.a();
@@ -282,8 +320,8 @@ export const EFFECTS = {
       E.at(px + dx * 0.34, py + dy * 0.34, pz + dz * 0.34);
       E.cone(0.6, E.range(1.2, 3.0) * s);
       E.P.vy += E.range(0.2, 0.7);
-      E.size(0.055 * s, 0.14 * s, 0.23 * s);
-      E.ramp(C.smokeWarm, 0.26, C.smokeCool, 0.14, C.smokeCool, 0);
+      E.size(0.055 * s, 0.16 * s, 0.28 * s);
+      E.ramp(C.smokeLit, 0.34, C.smokeWarm, 0.18, C.smokeCool, 0);
       E.P.life = E.range(0.45, 0.85); E.P.drag = 1.9; E.P.turb = 1.4;
       E.P.grav = -0.06; E.P.spin = E.sym(1.1); E.P.soft = 0.7;
       E.a();
@@ -314,17 +352,41 @@ export const EFFECTS = {
     E.fx();
   },
 
+  /**
+   * One spent case. Real dimensions: a 5.56x45 is 44.7 mm long and 9.6 mm across
+   * the base, and the CASING sprite fills 88% of its tile, so a 51 mm quad puts
+   * the brass at true size. It used to be a 30 mm square blob, which at half a
+   * metre from the lens is what made it read as wide as the magazine.
+   *
+   * `o.vx/vy/vz` arrive already rotated into world space from the weapon's
+   * `ejectVelocity` (local right/up/forward m/s) — out, up and slightly back.
+   */
   shell(E, o) {
     E.reset(SPRITE.CASING);
     E.at(o.px, o.py, o.pz);
-    E.P.vx = (o.vx ?? 1.6) + E.sym(0.4);
-    E.P.vy = (o.vy ?? 1.4) + E.sym(0.3);
-    E.P.vz = (o.vz ?? 0.4) + E.sym(0.4);
-    E.size(0.030, 0.030, 0.030);
-    E.ramp(C.brass, 1, C.brass, 1, C.brass, 1);
-    E.P.life = 2.6; E.P.bright = 1.5; E.P.spin = E.range(16, 30) * (E.rnd() > 0.5 ? 1 : -1);
-    E.P.grav = 1; E.P.drag = 0.15; E.P.soft = 0.12;
-    E.P.floorY = o.floorY ?? (o.py - 1.6); E.P.bounce = 0.36;
+    E.jitter(0.005);
+    // Multiplicative scatter, not additive: a shot-to-shot spread of +-12%
+    // keeps the ejection *pattern* while stopping every case tracing one line.
+    E.P.vx = (o.vx ?? 2.7) * E.range(0.88, 1.12);
+    E.P.vy = (o.vy ?? 1.9) * E.range(0.88, 1.12);
+    E.P.vz = (o.vz ?? -0.55) * E.range(0.88, 1.12);
+    E.size(0.051, 0.051, 0.051);
+    E.ramp(C.brass, 1, C.brass, 1, C.brass, 0);
+    E.P.life = 2.2;
+    // Brass is a polished metal in direct sun and the sprite carries no lighting
+    // of its own, so it needs a push past 1.0 to sit in the same exposure as the
+    // concrete around it rather than reading as a dull grey chip.
+    E.P.bright = 2.1;
+    // End over end about the long axis, the way brass leaves a port.
+    E.P.spin = E.range(12, 24) * (E.rnd() > 0.5 ? 1 : -1);
+    // The world runs an arcade gravity of -22 m/s^2, which is right for a player
+    // and wrong for a 12-gram case: at that rate the brass is gone before the
+    // eye follows it. 0.45 puts it back at roughly real 9.9.
+    E.P.grav = 0.45; E.P.drag = 0.08; E.P.soft = 0.10;
+    // Low restitution plus the batch's own tangential and spin damping gives a
+    // short hop and a settle rather than a rubber ball.
+    E.P.floorY = o.floorY ?? -1e9;
+    E.P.bounce = o.floorY !== undefined ? 0.24 : 0;
     E.a();
   },
 

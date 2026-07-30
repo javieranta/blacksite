@@ -14,6 +14,8 @@ import {
 } from './props/Scatter.js';
 import { ContactPass } from './props/Contact.js';
 import { FloatSweep } from './props/Float.js';
+import { LevelFloatPass } from './props/LevelFloat.js';
+import { capPlaceholderBags } from './props/parts/BagCap.js';
 import { buildBackdrop } from './props/parts/Backdrop.js';
 import { groundMarks, apronClutter, contactPatches } from './props/parts/GroundDress.js';
 import { groundIncident } from './props/parts/GroundIncident.js';
@@ -261,7 +263,26 @@ export class Props {
     //       Must run before contactPatches so the patches sit under final
     //       transforms, and before build() so deletions are still cheap.
     this.floats = new FloatSweep(this.probe);
-    const floatStats = this.floats.run(this.batcher);
+    const floatStats = this.floats.run(this.batcher, api);
+
+    // 10a2 — THE WORLD FLOAT AUDIT. Everything above only ever looks at props.
+    //        Four consecutive reviews reported floating rusted plates and three
+    //        props agents fixed the props system; the plates stayed, because the
+    //        offenders are LEVEL geometry and one of them is not even a collider
+    //        (see props/LevelFloat.js for the pixel-level identification). This
+    //        pass measures the world the same way the float sweep measures props
+    //        and gives every unsupported island a visible tie. Must run before
+    //        build() so the ties land in the existing merged batches.
+    this.levelFloats = new LevelFloatPass(this.probe);
+    const worldFloat = this.levelFloats.run(level, this.batcher, this.mats, rng.fork(8181), heroes);
+
+    // 10a3 — PLACEHOLDER SANDBAG REPLACEMENT. The "smooth pale mass" the review
+    //        keeps rejecting is not this system's sandbag kit: it is three
+    //        squashed spheres per revetment in the level's courtyard, and an
+    //        instance dump proved that ZERO of the 331 props sandbags are in the
+    //        hero frame at all. Props cannot delete the spheres, but it can lay a
+    //        real parapet of real bags over them. See parts/BagCap.js.
+    const bagCap = capPlaceholderBags(api, this.levelFloats.islandsOfSurface(level, 'fabric'));
 
     // 10b — soft contact patches under the shadowless litter, now that every
     //       transform is final. One quad each, one shared merged batch.
@@ -328,8 +349,20 @@ export class Props {
       floatDeleted: floatStats.deleted,
       floatMergedChecked: floatStats.mergedChecked,
       floatMergedDeleted: floatStats.mergedDeleted,
+      floatGrounded: floatStats.grounded,
+      floatHung: floatStats.hung,
       floatWorst: +floatStats.worstFloat.toFixed(3),
       floatWorstLeft: +floatStats.worstLeft.toFixed(4),
+      worldIslands: worldFloat.clusters,
+      worldSuspects: worldFloat.suspects,
+      worldResting: worldFloat.resting,
+      worldAttached: worldFloat.attached,
+      worldBraced: worldFloat.braced,
+      worldOrphaned: worldFloat.unbraceable,
+      worldOverBudget: worldFloat.overBudget,
+      bagCapRuns: bagCap.runs,
+      bagCapBlobs: bagCap.blobs,
+      bagCapBags: bagCap.bags,
       hessianFromForge: !!this.mats.hessianFromForge,
       ...wallStats, ...ceilStats,
       pointLights: this._lights.length,
@@ -357,14 +390,35 @@ export class Props {
     // The float sweep is the guarantee that covers what the contact pass exempts.
     // These four numbers are the proof it ran.
     console.info(
-      `[props] float sweep: checked ${floatStats.checked} prop instances `
-      + `+ ${floatStats.mergedChecked} merged pieces — ${floatStats.reseated} re-seated onto the `
-      + `world, ${floatStats.anchored} verified bolted to a surface, `
-      + `${floatStats.deleted + floatStats.mergedDeleted} deleted as floating `
-      + `(${floatStats.deleted} instances, ${floatStats.mergedDeleted} merged). `
+      `[props] float sweep: CHECKED ${floatStats.checked + floatStats.mergedChecked} loose props `
+      + `(${floatStats.checked} instances + ${floatStats.mergedChecked} merged pieces) · `
+      + `RESEATED ${floatStats.reseated} onto the surface beneath them · `
+      + `DELETED ${floatStats.deleted + floatStats.mergedDeleted} as floating `
+      + `(${floatStats.deleted} instances, ${floatStats.mergedDeleted} merged: `
+      + `${this.floats.deletionSummary()}) · `
+      + `${floatStats.grounded} resting, ${floatStats.anchored} bolted within `
+      + `18cm of a surface, ${floatStats.hung} given visible drop rods. `
       + `Worst float found ${floatStats.worstFloat.toFixed(3)}m, worst left `
       + `${floatStats.worstLeft.toFixed(4)}m.`,
     );
+    // The world float audit. These numbers are the answer to "why did three
+    // rounds of props-side reseat passes not remove the floating plates".
+    console.info(`[props] world float audit: ${this.levelFloats.summary()}.`);
+    console.info(
+      `[props] placeholder sandbags: found ${bagCap.blobs} level-authored bag blob(s) in `
+      + `${bagCap.runs} parapet run(s) and laid ${bagCap.bags} real bags over them `
+      + '(0 extra draw calls � existing sandbag prototypes).',
+    );
+    if (this.levelFloats.report.length) {
+      console.info(`[props] world float audit — braced: ${this.levelFloats.report.join(' | ')}.`);
+    }
+    if (this.levelFloats.orphans.length) {
+      console.warn(
+        '[props] world float audit — LEVEL-OWNED geometry still floating with nothing in '
+        + 'reach to fasten to (props cannot invent support that is not there): '
+        + `${this.levelFloats.orphans.join(' | ')}.`,
+      );
+    }
     if (backdrop) {
       console.info(
         `[props] backdrop: ${backdrop.pylons} pylons, ${backdrop.tanks} tanks, `

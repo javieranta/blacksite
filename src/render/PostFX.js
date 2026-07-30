@@ -9,11 +9,12 @@ import {
   SMAAEffect,
   SMAAPreset,
 } from 'postprocessing';
-import { RENDER } from '../core/Constants.js';
+import { CAMERA, RENDER } from '../core/Constants.js';
 import {
   BLOOM,
   DEFAULT_LOOK,
   DOF,
+  GTAO,
   LENS,
   LOOKS,
   MIP_BIAS,
@@ -120,6 +121,7 @@ export class PostFX {
     this._bufH = 0;
     this._v2 = new THREE.Vector2();
     this._adsFloor = 0;
+    this._directShare = 1;
     this._aoDebug = 0;
     this._fireflyDebug = 0;
     this._boundHandlers = [];
@@ -299,6 +301,11 @@ export class PostFX {
     }
     if (params.get('dof') === '0') this.setEffect('dof', false);
     if (params.get('ao') === '0') this.setEffect('ao', false);
+    // Locks the meter to the authored stop. Without this an A/B of any pass
+    // that changes total frame energy is unreadable: the meter compensates, and
+    // the difference you measure is the meter's response rather than the pass.
+    // That is how three reviews of the AO went wrong — see GTAO.openLevel.
+    if (params.get('autoexposure') === '0') this.setEffect('autoExposure', false);
     if (params.get('taa') === '0') this.setEffect('taa', false);
     if (params.get('cas') === '0') this.setEffect('cas', false);
     if (params.get('bloom') === '0') this.setEffect('bloom', false);
@@ -528,10 +535,17 @@ export class PostFX {
    * artifact so what lands on screen is the raw term rather than a tonemapped
    * version of it — which is how round 3's near-invisible AO managed to look
    * like a plausible white field.
-   * @param {0|1|2|3|4|5} mode 0 off · 1 visibility · 2 contact shadow ·
+   * @param {0|1|2|3|4|5|6|7} mode 0 off · 1 raw visibility · 2 contact shadow ·
    *   3 bent-normal sky share · 4 reconstructed normals · 5 the applied
    *   multiplier (shaping + multi-bounce + ambient split + contact, i.e. the
-   *   only one of these that says what actually reaches the image)
+   *   only one of these that says what actually reaches the image) ·
+   *   6 visibility after the open-plateau normalisation — compare against 1 to
+   *   see the estimator bias that was being spent on a global dim ·
+   *   7 the frame's direct share as a flat field
+   *
+   * Read mode 1 with a *measurement*, not an eyeball: a large patch of flat
+   * open ground should sit at `GTAO.openLevel · 255`. If it does not, that
+   * constant is stale and every downstream number in this pass is mis-scaled.
    */
   debugAO(mode = 0) {
     if (!this.composer) return;
@@ -667,21 +681,51 @@ export class PostFX {
         1,
       );
       this.dof.amount = t * t * (3 - 2 * t);
-      this.dof.setLens(ctx.camera.fov);
+      // The lens follows the ADS field of view, NOT ctx.camera.fov. The FOV ramp
+      // lives in fixedUpdate, which `?freeze=1` stops, so a frozen ADS capture
+      // reports the 80° hipfire FOV and the derived focal length comes out at
+      // 14mm — short enough that the circle of confusion is sub-pixel across the
+      // whole frame and the pass early-outs on every pixel. Interpolating the
+      // authored FOVs by the same progress that drives `amount` makes the lens
+      // agree with the sight picture in both the live game and the rig.
+      this.dof.setLens(THREE.MathUtils.lerp(CAMERA.fovBase, CAMERA.fovAds, t));
       this.dofPass.enabled = true;
     } else if (this.dofPass.enabled) {
       this.dofPass.enabled = false;
     }
   }
 
-  /** Refreshes the view-space sun direction used by AO and contact shadows. */
+  /**
+   * Refreshes the view-space sun direction used by AO and contact shadows, and
+   * the frame's direct/ambient balance.
+   *
+   * The balance matters because ambient occlusion multiplies *indirect* light
+   * only. AOApplyEffect estimates the direct share geometrically from N·L, but
+   * geometry alone cannot tell whether the sun is delivering anything: under
+   * the overcast rig the key light is `sunFactor: 0.16` against
+   * `envIntensity: 1.15`, so a surface can face the sun squarely and still
+   * receive essentially none of its light. Reading the live rig here is what
+   * lets the shader apply full occlusion in an ambient-only frame — which is
+   * exactly the frame (`hero-overcast`) where the missing AO was called out.
+   *
+   * Both values come through sanctioned seams: the `lighting` registry entry
+   * and `scene.environmentIntensity`. Nothing is written.
+   */
   _updateSun(camera, ctx) {
-    const src =
-      ctx.get('lighting')?.sunDirection ?? ctx.get('sky')?.sunDirection ?? null;
+    const lighting = ctx.get('lighting');
+    const src = lighting?.sunDirection ?? ctx.get('sky')?.sunDirection ?? null;
     if (src) this._sunWorld.copy(src).normalize();
     this._normalMatrix.setFromMatrix4(camera.matrixWorldInverse);
     this._sunView.copy(this._sunWorld).applyMatrix3(this._normalMatrix).normalize();
     this.aoApply.sunView = this._sunView;
+
+    // Irradiance a horizontal surface would receive from the key light, against
+    // the environment's contribution. Below the horizon the key delivers zero.
+    const sunI = lighting?.sun?.intensity ?? 0;
+    const direct = sunI * Math.max(0, this._sunWorld.y);
+    const ambient = (ctx.scene.environmentIntensity ?? 1) * GTAO.ambientReference;
+    this._directShare = direct / (direct + ambient + 1e-4);
+    this.aoApply.directShare = this._directShare;
   }
 
   render(dt, ctx) {

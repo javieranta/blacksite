@@ -64,6 +64,8 @@ uniform float uFalloffStart;
 uniform float uContactLength;
 uniform float uContactThickness;
 uniform float uContactStrength;
+uniform float uContactFalloff;
+uniform float uContactNdlGain;
 uniform float uFrame;
 varying vec2 vUv;
 
@@ -135,13 +137,22 @@ float contactShadow(const in vec3 p, const in vec3 n, const in float jitter) {
     float diff = (-sp.z) - sz;   // >0 ⇒ something sits in front of the ray
 
     if (diff > 0.008 && diff < uContactThickness) {
-      // Near hits matter most: a blocker 5cm away is a contact, one 50cm away
-      // is the shadow map's job and would double-darken if taken at full value.
-      float w = 1.0 - dist / uContactLength;
-      occ = max(occ, w * w);
+      // Near hits still matter most, but the falloff has to stay near 1 across
+      // the useful part of the march. w*w (round 5-6) scored a hit at 0.2m of a
+      // 0.35m march at 0.18, so only blockers inside the first few centimetres
+      // ever registered and the whole channel measured as a hairline. Shaping
+      // 1 - (d/L)^p keeps a 20cm-away kerb at ~0.75 and only fades at the tail
+      // where the cascade takes over.
+      float w = 1.0 - pow(dist / uContactLength, uContactFalloff);
+      occ = max(occ, clamp(w, 0.0, 1.0));
     }
   }
-  return clamp(1.0 - occ * uContactStrength * clamp(ndl * 3.0, 0.0, 1.0), 0.0, 1.0);
+  // N·L is already applied by the material that lit this pixel. The guard here
+  // exists only to drop the term where the sun lies almost in the surface plane
+  // and the march degenerates — hence a steep gain rather than the ×3 that used
+  // to halve every golden-hour contact shadow in the frame.
+  return clamp(
+    1.0 - occ * uContactStrength * clamp(ndl * uContactNdlGain, 0.0, 1.0), 0.0, 1.0);
 }
 
 void main() {
@@ -323,6 +334,8 @@ export class GTAOPass extends Pass {
         uContactLength: { value: GTAO.contactLength },
         uContactThickness: { value: GTAO.contactThickness },
         uContactStrength: { value: GTAO.contactStrength },
+        uContactFalloff: { value: GTAO.contactFalloffPower },
+        uContactNdlGain: { value: GTAO.contactNdlGain },
         uFrame: { value: 0 },
       },
       vertexShader,

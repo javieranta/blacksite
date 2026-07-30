@@ -27,10 +27,45 @@ export const GTAO = {
    * nothing to do with its width (see `power` below) and the extra radius only
    * cost horizon-search coherence.
    */
-  radius: 0.65,
+  radius: 0.62,
+
   /**
-   * Shaping of the raw visibility integral before it is applied:
-   *   ao = 1 − (1 − visibility^power) · intensity
+   * ── ROUND 7 ROOT CAUSE (the one that survived three reviews) ──────────────
+   * The unoccluded plateau of this estimator is **not 1.0**. A measured
+   * `?aodebug=1` capture of material-closeup reads the *open, flat, entirely
+   * unoccluded* foreground deck at median 249/255 = 0.976 and p25 0.969 —
+   * a ~3% deficit that comes from the finite step count, the minimum tap
+   * distance picking up the surface itself at grazing incidence, and the
+   * temporal filter's neighbourhood clamp. It is estimator bias, not occlusion.
+   *
+   * `power: 3.0` then turned that 2.4% bias into a **7% dim of every pixel in
+   * the frame**, and `intensity`/`skyBias` pushed the floor to roughly 0.88.
+   * That is a global energy loss, and the AutoExposurePass sits *nine passes
+   * downstream* of the AO composite: it meters the darkened frame, opens up by
+   * exactly the amount AO removed, and hands the brightness straight back.
+   *
+   * The proof is a measured A/B. Capturing hero-overcast with `?ao=0` and with
+   * AO on and differencing the two: **62% of pixels are BRIGHTER with AO
+   * enabled** (4–24 codes). Ambient occlusion was making the frame lighter.
+   * Whatever local contrast the term produced was simultaneously being lifted
+   * by a global exposure gain of the same magnitude, which is precisely why
+   * three rounds of "the code is there" never produced a visible contact band.
+   *
+   * `openLevel` is the fix and it is the single most important number in this
+   * block. The raw visibility is divided by it and clamped, so a genuinely open
+   * surface lands at **exactly 1.0** and contributes exactly zero global energy
+   * loss — the meter does not move, and every remaining bit of AO in the frame
+   * is local contrast where it belongs. Occluded values keep their full range
+   * (0.72 / 0.965 = 0.75, then shaped).
+   *
+   * Set it from a measurement, not by eye: shoot `?aodebug=1`, take the median
+   * of a large patch of flat open ground, divide by 255.
+   */
+  openLevel: 0.965,
+
+  /**
+   * Shaping of the normalised visibility before it is applied:
+   *   ao = 1 − (1 − (visibility/openLevel)^power) · intensity
    *
    * ── ROUND 5 ROOT CAUSE ────────────────────────────────────────────────────
    * This constant, and `multiBounce` below, were both documented, both declared
@@ -55,18 +90,42 @@ export const GTAO = {
    * textbook value assumes. A power of 2 on a 0.90 input is a 19% multiply. A
    * power of 3 is 27%, and paired with the contact-shadow fix below that is what
    * finally reads as grounding.
+   *
+   * ── ROUND 7 ──────────────────────────────────────────────────────────────
+   * Dropped 3.0 → 2.0. The power was inflated in round 5 to compensate for the
+   * estimator bias described under `openLevel`; now that the bias is divided
+   * out at the source, a cube is no longer needed and was costing shape — it
+   * crushed the 0.85–0.95 range (the soft ambient falloff going into a corner)
+   * into near-nothing while only the last few centimetres survived, which reads
+   * as a hard outline rather than as contact shading.
    */
-  power: 3.0,
-  intensity: 0.95,
+  power: 2.0,
+  intensity: 0.90,
   /** Directional slices per pixel; each marches both ways from the centre. */
   slices: 3,
-  /** Horizon-search steps per direction. 3 slices × 2 dirs × 6 = 36 taps. */
-  steps: 6,
+  /**
+   * Horizon-search steps per direction. 3 slices × 2 dirs × 8 = 48 taps.
+   * Raised 6 → 8 in round 7: with a t² tap distribution over a radius that
+   * clamps at `maxRadiusPx`, six steps leave a gap between the 3rd and 4th tap
+   * wide enough for a 4cm kerb or base plate to fall through — which is exactly
+   * the occluder class this whole pass exists to catch. Measured cost of the
+   * two extra taps is well inside budget at half resolution.
+   */
+  steps: 8,
   /** Screen-space clamp on the search radius, in half-res pixels. */
   minRadiusPx: 3.0,
   maxRadiusPx: 96.0,
-  /** Falloff band as a fraction of the radius: samples fade out over the tail. */
-  falloffStart: 0.55,
+  /**
+   * Falloff band as a fraction of the radius: samples fade out over the tail.
+   * 0.55 meant a sample was already at half weight by 34cm, so the readable
+   * contact band around a base plate or a barrel foot was only a few
+   * centimetres wide — present in the buffer, too narrow to read on screen.
+   * 0.74 holds full weight out to 46cm and fades over the last 16cm. This costs
+   * nothing on open ground (a flat plane has no occluders at any distance, and
+   * `openLevel` pins it to 1 regardless); it only widens the band where there is
+   * actually something to be occluded by.
+   */
+  falloffStart: 0.74,
 
   /**
    * Screen-space contact shadow, marched toward the sun.
@@ -85,11 +144,35 @@ export const GTAO = {
    * 0.35m over 14 steps is a 2.5cm stride. Anything longer than ~0.4m is the
    * shadow map's job anyway; the whole purpose of this term is the last few
    * centimetres that a 6cm-per-texel cascade plus its depth bias cannot resolve.
+   *
+   * ── ROUND 7: the march resolution was fixed, the *weighting* was not ──────
+   * A measured `?aodebug=2` capture of material-closeup (golden hour, low sun,
+   * base plates and kerbs everywhere) reads the contact channel at median
+   * 255/255 with p05 254 — i.e. **fewer than 5% of pixels receive any contact
+   * shadow at all**, and what does appear is a 1–3cm hairline off plank seams.
+   * Two multiplications were responsible, and neither is in `contactStrength`:
+   *
+   *   • `occ = max(occ, w·w)` with `w = 1 − dist/contactLength`. A hit 20cm
+   *     along a 35cm march scores w² = 0.18. The quadratic means only blockers
+   *     inside the first ~5cm ever register meaningfully, so a 4cm kerb casting
+   *     a 25cm contact shadow across the deck contributes almost nothing.
+   *     `contactFalloffPower` now shapes `1 − (dist/length)^p` instead, which
+   *     stays near 1 across the useful part of the march and falls off at the
+   *     tail where the shadow map takes over.
+   *   • `clamp(N·L · 3, 0, 1)`. At golden hour N·L on a horizontal deck is
+   *     0.15–0.25, so this halved the term at exactly the sun elevation where
+   *     contact shadows carry the frame. N·L is already applied by the material
+   *     that lit the pixel; applying it a second time here is double-counting.
+   *     `contactNdlGain` raises it to 9 so it only guards the genuinely
+   *     degenerate case (sun within ~6° of the surface plane, where depth-buffer
+   *     marching is unreliable) instead of taxing every low-sun frame.
    */
   contactLength: 0.35,   // metres
   contactSteps: 14,
   contactThickness: 0.16,
   contactStrength: 0.95,
+  contactFalloffPower: 2.4,
+  contactNdlGain: 9.0,
 
   /** Temporal filter. Blend weight while the camera moves; 1/n while still. */
   movingAlpha: 0.20,
@@ -113,8 +196,32 @@ export const GTAO = {
    * side of a junction keeps its full occlusion while the open sunlit floor two
    * centimetres away keeps its full brightness, which is exactly the contrast
    * that makes an object look like it is resting on something.
+   *
+   * ── ROUND 7: this was a CONSTANT, and that is a bug ──────────────────────
+   * `directMask = saturate(N·L) · contactShadow` is pure geometry. It knows the
+   * angle to the sun; it does not know whether the sun is *delivering* anything.
+   * Under the overcast rig the key light is `sunFactor: 0.16` against
+   * `envIntensity: 1.15` — there is effectively no direct light at all, which
+   * is why that preset has no cast shadows. Yet this constant still removed 70%
+   * of the ambient occlusion from every upward-facing surface, on the strength
+   * of a sun that was not contributing.
+   *
+   * `hero-overcast` is the reviewer's stated proof case precisely because it is
+   * pure sky ambient — the one frame where AO should be at *full* strength was
+   * the frame where it was suppressed hardest.
+   *
+   * This is now the **ceiling** on the protection, scaled per frame by the
+   * measured direct share (see `PostFX._updateSun`). Midday keeps its full
+   * protection; overcast keeps essentially none.
    */
   directProtect: 0.70,
+  /**
+   * Reference ambient irradiance used to turn `sun.intensity` and
+   * `scene.environmentIntensity` into a 0..1 direct share. Not physical — it is
+   * the constant that makes `direct / (direct + ambient)` land near 0.9 at
+   * midday and near 0.05 under overcast with this project's light rigs.
+   */
+  ambientReference: 0.85,
   /**
    * How much of GTAO's albedo-aware multi-bounce remap to apply. At 1.0 it
    * lifts a 0.5 occlusion on bright concrete back to 0.65, which is physically
@@ -126,8 +233,12 @@ export const GTAO = {
    * the remap at full strength. Trimmed to 0.38 for round 6 alongside the
    * `directProtect` change: with the occlusion now confined to the ambient share
    * there is less of it in flight, so less of it can be handed back.
+   *
+   * Round 7: 0.28. With `openLevel` now pinning open ground to exactly 1, the
+   * only place the remap can act is inside a genuine crevice — which is the one
+   * place we do not want the occlusion handed back.
    */
-  multiBounce: 0.38,
+  multiBounce: 0.28,
   /** Colour a fully occluded pixel converges to — crevices lose the blue sky. */
   occludedTint: [0.020, 0.021, 0.030],
   /** Extra occlusion where the bent normal has swung away from the sky. */
@@ -258,7 +369,27 @@ export const FIREFLY = {
  * that is exactly the point: the numbers below are a real lens, not a dial.
  */
 export const DOF = {
-  fStop: 5.6,
+  /**
+   * ── ROUND 7: why there was no depth of field in the ADS captures ──────────
+   * The lens model here is correct; the numbers made it a no-op. Two of them:
+   *
+   *   • The focal length came from `ctx.camera.fov`, and the screenshot rig
+   *     passes `?freeze=1`, which stops `fixedUpdate` — the very place the ADS
+   *     FOV ramp lives. So every ADS capture ran the lens at the 80° hipfire
+   *     FOV, giving f = 14mm instead of the 23mm the sight picture actually has.
+   *   • At f/5.6 on a 14mm lens focused 30m out, the circle of confusion at 2m
+   *     is 0.77px and beyond focus it is 0.03px — both under `minCoCPx`, so the
+   *     shader early-outs on literally every pixel in the frame. "No depth of
+   *     field in ADS" was not a missing feature, it was a lens stopped down far
+   *     past the point where a 24mm sensor can resolve any separation at all.
+   *
+   * f/2.4 on the real 23mm ADS focal length puts the near ground at 3–4px of
+   * blur and holds the far plate at well under the 2px clamp, which is the mild
+   * near-field falloff a real 1× sight picture has. PostFX now drives the lens
+   * from `CAMERA.fovAds` interpolated by ADS progress rather than from a camera
+   * FOV that a frozen simulation never updates.
+   */
+  fStop: 2.4,
   /** 35mm-format sensor, so focal length follows from the ADS vertical FOV. */
   sensorHeightMM: 24.0,
   /** Reticle metering clamp, metres. */

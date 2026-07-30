@@ -1,241 +1,415 @@
 import * as THREE from 'three';
 import { Mesher, boxG, cylG } from './Shapes.js';
-import { LAYOUT } from './Weapon.js';
+import {
+  IDENT, child, frameAt, ridge, offsetPath, wrapDigit, bandOnPath,
+  digit, phalanges, forearm,
+} from './Wrap.js';
 
 /**
  * OWNER: viewmodel agent.
  *
  * Gloved first-person hands and forearms.
  *
- * Built on a nested matrix skeleton rather than flat offsets: a finger is three
- * tapering segments each rotated about its own joint frame, so a curl is one
- * number and the segments stay connected. That is the difference between hands
- * that wrap the weapon and blocks parked next to it.
+ * ─── WHY FOUR PREVIOUS REVISIONS WERE INVISIBLE ───────────────────────────
  *
- * Materials do the rest — a twill glove texture with stitch rows in the normal
- * map, rubber knuckle and palm pads as separate raised geometry, and a ripstop
- * sleeve with a cuff strap. Nothing here is a box with a flat grey material,
- * which was the loudest tell in the previous revision.
+ * Every one of them was diagnosed as a geometry bug and was not. Round 7's hands
+ * were built (6684 triangles), parented under the rig root, in ctx.viewScene,
+ * on layer 0, `visible === true`, inside the 0.005-12 m view frustum, with valid
+ * materials, projecting to screen bounds 1049..1514 x 638..1204 — dead centre of
+ * the weapon. Hiding every weapon mesh made them appear immediately. They were
+ * being drawn and then losing the depth test, in full, every frame.
+ *
+ * Because they were on the wrong side of the gun.
+ *
+ * MEASURE THE EYE FIRST. The hip pose puts the weapon at camera-space
+ * (0.1890, -0.1797, -0.6159) with YXZ rotation (0.0484, 0.2505, 0.1007). Invert
+ * that and the camera sits, in *weapon* space, at
+ *
+ *      (-0.3134, +0.2389, +0.5404)     — 313 mm LEFT of the bore,
+ *                                        239 mm ABOVE it, 540 mm BEHIND.
+ *
+ * so the eye sees the weapon's LEFT flank, its top, and its rear. Everything at
+ * x > 0 that sits behind a surface at x ~ 0 is invisible, and the receiver,
+ * magwell, magazine and stock are all at x ~ 0.
+ *
+ * Round 7's firing hand was authored entirely at grip x = +0.015..+0.036 — the
+ * far flank. The magazine occluded it. Its thumb was a detached island behind the
+ * receiver. The support hand sat under its own oversized sleeve. The only hand
+ * geometry that survived the depth test was that support sleeve, which ran out to
+ * x = -0.089 and *ended inside the frame* with a capped elbow: a smooth dark
+ * cone with a rimmed disc on the end, crossing in front of the receiver. Five
+ * reviewers looked straight at it and read it as a length of pipe in the level.
+ *
+ * ─── WHAT IS AUTHORED HERE, AND WHY EACH PART EARNS ITS PLACE ─────────────
+ *
+ * Nothing goes in unless a ray from it to (-0.3134, 0.2389, 0.5404) clears the
+ * weapon. Concretely:
+ *
+ *   SUPPORT HAND — the load-bearing read, and the largest. A C-clamp grip: the
+ *   palm lies along the handguard's LEFT flank (the flank the eye is looking at),
+ *   the four metacarpal heads ride the shoulder between the handguard and the
+ *   rail, the fingers bridge that notch, cross OVER the rail and come down the
+ *   far side, and the thumb points forward along the upper-left beside the rail.
+ *   That puts a 78 x 52 mm slab of glove, four separated rubber knuckles, four
+ *   converging metacarpal ridges and a thumb entirely in the clear, and it
+ *   silhouettes the finger tops against the background above the weapon.
+ *     In ADS the same hand is *correctly* hidden: from an on-axis eye, anything
+ *   above y = 0.039 at z = -0.104 falls in the optic housing's shadow, so the
+ *   knuckles do not appear in the sight picture. Only the palm's lower-left edge
+ *   shows, which is what a real ADS frame shows.
+ *
+ *   SUPPORT FOREARM — the biggest single element, ~450 px running from the hand
+ *   down to the bottom-left corner. Directed (-0.60, -0.66, 0.45) and 300 mm
+ *   long so the elbow lands at (1000, 1187): off the bottom edge, never a disc.
+ *
+ *   FIRING HAND — the grip is 17 px from the bottom of the frame, so its palm,
+ *   knuckles, thumb, heel and wrist are all either on the far flank or below the
+ *   frame, and no amount of modelling changes that. What *is* visible is the
+ *   finger wrap: seeded on the grip's right flank, round the front strap, tips
+ *   landing on the LEFT flank at grip x = -0.022 — 6 mm proud of a flank the eye
+ *   sees square-on, with nothing in front of them (the magwell lip stops at
+ *   y = -0.0445, the trigger guard at |x| = 0.0143). Three stacked fingertips
+ *   breaking the grip's front-left silhouette is exactly what a real hipfire
+ *   frame shows of a firing hand. The rest of the hand is built anyway, because
+ *   the inspect pose and the reload roll do show it.
+ *
+ * ─── THE POSES ────────────────────────────────────────────────────────────
+ *
+ * Both hands are rigid children of the weapon rig, so idle sway, breathing, the
+ * walk cycle, sprint carry, recoil, the reload roll and the ADS transition all
+ * carry them with the weapon by construction: there is no pose in which a hand
+ * can slide off the gun, because there is no independent hand transform to get
+ * out of step. What each pose changes is which parts the eye can see, and that is
+ * why the wrap is authored to touch on *all* sides rather than to look right from
+ * one camera.
  */
-
-const IDENT = new THREE.Matrix4();
-
-function child(parent, x, y, z, rx = 0, ry = 0, rz = 0) {
-  const local = new THREE.Matrix4().compose(
-    new THREE.Vector3(x, y, z),
-    new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz, 'YXZ')),
-    new THREE.Vector3(1, 1, 1),
-  );
-  return new THREE.Matrix4().multiplyMatrices(parent, local);
-}
-
-/** Child frame with an explicit basis: columns are the new X, Y, Z axes. */
-function childBasis(parent, x, y, z, ax, ay, az) {
-  const local = new THREE.Matrix4().makeBasis(ax, ay, az);
-  local.setPosition(x, y, z);
-  return new THREE.Matrix4().multiplyMatrices(parent, local);
-}
-
-const V = (x, y, z) => new THREE.Vector3(x, y, z);
-
-/**
- * One finger: three segments extending along the frame's +Z, each hinged about
- * the frame's X axis so the curl happens in the YZ plane. Knuckle pads ride on
- * the +Y side of the proximal segment.
- */
-function finger(m, frame, o) {
-  let joint = child(frame, 0, 0, 0);
-  const curls = o.curls;
-  for (let s = 0; s < 3; s++) {
-    joint = child(joint, 0, 0, 0, curls[s]);
-    const len = o.len * (1 - s * 0.17);
-    const th = o.thick * (1 - s * 0.11);
-    const th2 = o.thick * (1 - (s + 1) * 0.11);
-    m.use('glove');
-    boxG(m, {
-      mat4: child(joint, 0, 0, len / 2),
-      w: th, h: th * 1.10, d: len, w1: th2, h1: th2 * 1.10, c: 0.0011, simple: true,
-    });
-    // A soft crease bead at each joint stops the segments reading as a stack.
-    if (s < 2) {
-      cylG(m, {
-        mat4: child(joint, 0, -th * 0.10, len - 0.0004, 0, Math.PI / 2),
-        r0: th * 0.56, len: th * 0.80, seg: 8, c: 0.0004,
-      });
-    }
-    if (s === 0 && o.pad) {
-      m.use('pad');
-      boxG(m, {
-        mat4: child(joint, 0, th * 0.60, len * 0.46),
-        w: th * 0.92, h: th * 0.34, d: len * 0.80, c: 0.0008, simple: true,
-      });
-    }
-    joint = child(joint, 0, 0, len);
-  }
-  return joint;
-}
-
-/**
- * Forearm + sleeve running away from a wrist frame along its +Z. Tapers up
- * toward the elbow and gets a ripstop cuff with a strap and a tab.
- */
-function forearm(m, wrist, o) {
-  const r = o.r;
-  m.use('glove');
-  // Swept round rather than boxed: a rectangular prism 150 mm long reads as a
-  // plank the moment it is seen at an angle, and the support forearm crosses a
-  // lot of frame in the hipfire pose.
-  cylG(m, { mat4: child(wrist, 0, 0, o.cuff * 0.5),
-    r0: r * 0.90, r1: r, len: o.cuff, seg: 14, c: 0.0014, capA: false });
-  m.use('sleeve');
-  cylG(m, { mat4: child(wrist, 0, 0, o.cuff + 0.0090),
-    r0: r * 1.15, r1: r * 1.12, len: 0.0180, seg: 14, c: 0.0018 });
-  cylG(m, { mat4: child(wrist, 0, 0, o.cuff + 0.0180 + o.len * 0.5),
-    r0: r * 1.06, r1: r * 1.36, len: o.len, seg: 14, c: 0.0024, capB: false });
-  // adjustment strap across the cuff and a hook-and-loop tab
-  m.use('pad');
-  cylG(m, { mat4: child(wrist, 0, 0, o.cuff + 0.0090),
-    r0: r * 1.21, len: 0.0072, seg: 14, c: 0.0010 });
-  boxG(m, { mat4: child(wrist, r * 1.18, 0, o.cuff + 0.0090),
-    w: 0.0062, h: 0.0150, d: 0.0110, c: 0.0010, simple: true });
-}
 
 /* ------------------------------------------------------------- firing hand */
 
+/**
+ * The pistol grip's section, in grip-local (x, y), listed in the wrap direction:
+ * from the backstrap over the right flank, round the front strap, up the left
+ * flank. The grip box is 32.2 x 43.0 mm with a 7 mm chamfer and a slight taper;
+ * these are its mid-length half-extents with the chamfer corners called out, so
+ * the offset path arcs round exactly the radius the real front strap has.
+ *
+ * Grip frame: +X right, +Y rearward (toward the backstrap), +Z down the grip.
+ */
+const GRIP_SEC = [
+  [0.0088, 0.0210],    // backstrap, right corner
+  [0.0158, 0.0140],    // right flank, top of the chamfer
+  [0.0158, -0.0140],   // right flank, bottom of the chamfer
+  [0.0088, -0.0210],   // front strap, right corner
+  [-0.0088, -0.0210],  // front strap, left corner
+  [-0.0158, -0.0140],  // left flank, bottom of the chamfer
+  [-0.0158, 0.0140],   // left flank, top of the chamfer
+];
+
+/** Grip frame in weapon space — matches lowerReceiver()'s `grip` exactly. */
+const GRIP = child(IDENT, 0, -0.0742, 0.1178, Math.PI / 2 - 0.30);
+
 function firingHand(m) {
-  // The grip's own frame: +X right, +Y rearward, +Z down the grip. The grip box
-  // is 32.2 x 44 mm, so its surfaces sit at |x| = 16.1 mm and y = -22 mm (front)
-  // / +22 mm (back). Every knuckle below is placed *outside* those surfaces:
-  // start a finger inside the grip and the whole wrap ends up buried in it,
-  // leaving only stubby nubs poking out — which is exactly what happened first
-  // time round.
-  const grip = child(IDENT, 0, -0.0742, 0.1178, Math.PI / 2 - 0.30);
+  const digits = offsetPath(GRIP_SEC, 0.0064);
+  const palm = offsetPath(GRIP_SEC, 0.0118);
+  const knuck = offsetPath(GRIP_SEC, 0.0132);
+  const DORS = [1, 0, 0];                        // outboard = back of the hand
 
-  m.use('glove');
-  // palm against the right flank
-  boxG(m, { mat4: child(grip, 0.0248, 0.0000, -0.0030),
-    w: 0.0210, h: 0.0500, d: 0.0790, w1: 0.0186, h1: 0.0450, c: 0.0030 });
-  // dorsum, standing slightly proud of the palm
-  boxG(m, { mat4: child(grip, 0.0316, -0.0030, -0.0090),
-    w: 0.0090, h: 0.0400, d: 0.0640, c: 0.0026 });
-  // thenar pad at the thumb root, wrapping onto the backstrap
-  boxG(m, { mat4: child(grip, 0.0180, 0.0250, -0.0300),
-    w: 0.0290, h: 0.0210, d: 0.0300, c: 0.0026 });
-  // heel of the hand at the base of the grip
-  boxG(m, { mat4: child(grip, 0.0232, 0.0090, 0.0355),
-    w: 0.0230, h: 0.0400, d: 0.0220, c: 0.0028 });
-  m.use('pad');
-  // knuckle armour across the back of the hand
-  boxG(m, { mat4: child(grip, 0.0356, -0.0040, -0.0170),
-    w: 0.0040, h: 0.0320, d: 0.0400, c: 0.0012, simple: true });
-
+  // Rows run down the grip: middle, ring, little. The index is the trigger
+  // finger and is built separately, in weapon space.
+  const rows = [-0.0100, 0.0100, 0.0300];
   /**
-   * Fingers wrap the front of the grip: frame +Z forward, curl toward -X.
-   * Curls of 0.75 / 1.10 / 1.00 turn the finger through 163 degrees, which
-   * takes the tip from the right flank, around the front face and onto the
-   * left-front corner — the arc a hand actually makes on a 32 mm grip.
+   * WRAP FURTHER THAN LOOKS NECESSARY. The grip's front strap faces weapon
+   * (0, -0.296, -0.955) — down and *forward* — so from an eye 540 mm behind the
+   * weapon it is a back face. Everything a finger does on the front strap is
+   * hidden; only the part that comes round onto the LEFT flank is photographed.
+   * A 57 mm finger (which is what a 23 mm proximal gives) reaches the flank with
+   * 4 mm to spare and shows three fingertip nubs and nothing else. A 68 mm
+   * finger — which is also the real length of a gloved middle finger from the
+   * MCP — puts its whole middle phalanx and its whole distal on the flank, so
+   * each digit shows about 30 mm of length with a crease bead in the middle.
+   * That is the difference between "three pale nubs" and "a hand gripping".
    */
-  const knuckle = (dz) => childBasis(grip, 0.0196, -0.0245, dz,
-    V(0, 0, -1), V(1, 0, 0), V(0, -1, 0));
-  const rows = [-0.0060, 0.0140, 0.0330];
+  const lens = [0.0273, 0.0258, 0.0232];
+  // Seeds sit in the arc off the right flank's front chamfer, so the metacarpal
+  // heads land on the flank behind the front strap, which is where a fist's
+  // knuckles actually are. Each successive finger starts a shade further round,
+  // the way a fist's knuckle line rakes.
+  const seeds = [0.0450, 0.0464, 0.0478];
+
+  // ---- palm, thenar and heel ----------------------------------------------
+  /**
+   * Three band steps, not five, with 6 mm of overlap. A band emits a chamfered
+   * slab per step, and from a raking eye every step edge is a ledge: six of them
+   * up the flank read as a stack of armour plates, which is what the first pass
+   * of this rewrite looked like. Three heavily-overlapped steps read as one mass
+   * with a curve in it.
+   */
+  m.use('glove');
+  bandOnPath(m, palm, {
+    s0: 0.0040, s1: 0.0450, z: 0.0040, steps: 3, overlap: 0.0060,
+    w0: 0.0770, w1: 0.0710, h0: 0.0214, h1: 0.0198,
+  });
+  /**
+   * Thenar eminence and palm heel — the web at the base of the thumb and the
+   * mass behind the backstrap.
+   *
+   * These are the ONLY parts of the firing hand's bulk the hip pose photographs:
+   * the thenar projects to about (1371, 940) and the heel to (1405, 1039), both
+   * in open air behind the grip and below the receiver's rear, with nothing in
+   * front of them. First pass they were chamfered boxes and came back as two
+   * pale bricks — a box has six flat faces and three hard silhouette corners, and
+   * at 4x magnification that is what they looked like.
+   *
+   * Built from crossed cylinders instead. A cylinder's silhouette is a curve and
+   * its shading is a gradient, so three overlapping ones read as one soft mass
+   * with a fleshy edge, which is what the back of a fist is. Same triangle count,
+   * completely different photograph.
+   */
+  cylG(m, { mat4: child(GRIP, 0.0130, 0.0230, -0.0180, 0, Math.PI / 2, 0.28),
+    r0: 0.0132, r1: 0.0116, len: 0.0290, seg: 12, c: 0.0028 });
+  cylG(m, { mat4: child(GRIP, 0.0146, 0.0206, 0.0060, 0.16, 0, 0),
+    r0: 0.0126, r1: 0.0134, len: 0.0330, seg: 12, c: 0.0026 });
+  cylG(m, { mat4: child(GRIP, 0.0160, 0.0230, 0.0330, 0.12, 0, 0),
+    r0: 0.0134, r1: 0.0120, len: 0.0330, seg: 12, c: 0.0026 });
+  // Thumb metacarpal riding over the web, so the thumb grows out of the mass.
+  cylG(m, { mat4: child(GRIP, 0.0068, 0.0306, -0.0200, 0, 0, 0.24),
+    r0: 0.0064, r1: 0.0054, len: 0.0250, seg: 10, c: 0.0016 });
+  /**
+   * Fist toe, below the grip's buttcap. The grip's own toe projects to
+   * (1356, 1063) — 17 px off the bottom edge — so this is off-frame in hipfire
+   * and is here for the inspect pose and for the reload, where the weapon rolls
+   * far enough up that the bottom of the fist comes into shot.
+   */
+  boxG(m, { mat4: child(GRIP, 0.0070, 0.0020, 0.0560, 0, 0, 0.06),
+    w: 0.0400, h: 0.0428, d: 0.0300, c: 0.0060 });
+
+  // ---- metacarpals and knuckle armour -------------------------------------
+  const wristLocal = [0.0230, 0.0250, 0.0350];
+  const kp = [0, 0, 0, 0, 0, 0];
   for (let i = 0; i < 3; i++) {
-    finger(m, knuckle(rows[i]), {
-      len: 0.0212 - i * 0.0012, thick: 0.0106 - i * 0.0005,
-      curls: [0.75 + i * 0.05, 1.10, 1.00 - i * 0.05], pad: true,
+    knuck.at(seeds[i], kp);
+    ridge(m, GRIP, wristLocal, [kp[0], kp[1], rows[i]], 0.0034, 0.0034, DORS);
+  }
+  m.use('pad');
+  for (let i = 0; i < 3; i++) {
+    knuck.at(seeds[i], kp);
+    boxG(m, { mat4: frameAt(GRIP, kp[0], kp[1], rows[i], [0, 0, 1], [kp[4], kp[5], 0]),
+      w: 0.0132, h: 0.0122, d: 0.0074, c: 0.0016, simple: true });
+  }
+
+  // ---- the wrap -----------------------------------------------------------
+  /**
+   * Three fingers walk the offset path from the right flank, round the front
+   * strap, onto the left flank. Solved, not posed — `wrapDigit` bisects each
+   * phalanx's arc-length step so the bone is its real length and both ends sit
+   * on the offset curve, which is one finger half-thickness off the grip.
+   */
+  m.use('glove');
+  for (let i = 0; i < 3; i++) {
+    const w = wrapDigit(digits, seeds[i], phalanges(lens[i]));
+    digit(m, frameAt(GRIP, w.p[0], w.p[1], rows[i], [w.dir[0], w.dir[1], 0], [w.back[0], w.back[1], 0]), {
+      len: lens[i], thick: 0.0118 - i * 0.0006, curls: w.curls, pad: true,
     });
   }
-  // Trigger finger: forward past the guard, then hooked back onto the shoe.
-  const tf = childBasis(grip, 0.0190, -0.0230, -0.0290,
-    V(0, 0, -1), V(1, 0, 0), V(0, -1, 0));
-  finger(m, tf, { len: 0.0210, thick: 0.0108, curls: [0.20, 0.34, 1.10], pad: true });
 
-  // Thumb over the top of the backstrap toward the selector. The basis must
-  // stay right-handed — a mirrored frame flips the winding and the normals.
-  const th = childBasis(grip, 0.0210, 0.0230, -0.0330,
-    V(0, 0, 1), V(0, 1, 0), V(-1, 0, 0));
-  finger(m, th, { len: 0.0196, thick: 0.0126, curls: [0.34, 0.34, 0.26], pad: false });
+  /**
+   * Trigger finger, on the trigger. Built in weapon space, not grip space: the
+   * grip is raked 17 degrees, so "forward" in the grip frame runs 17 degrees
+   * downhill and a finger built there dives under the guard instead of reaching
+   * the trigger face at (0, -0.0398, 0.0748). Kept inside |x| < 0.023 so it stays
+   * within the trigger guard's loop rather than poking through its outside.
+   */
+  const tf = frameAt(IDENT, 0.0186, -0.0286, 0.1010, [-0.20, -0.30, -0.93], [0.62, 0.78, 0.06]);
+  digit(m, tf, { len: 0.0212, thick: 0.0110, curls: [0.34, 0.46, 0.52], pad: true });
 
-  // Wrist heading back, down and outboard toward the right shoulder. The Euler
-  // is solved rather than guessed: for YXZ order the frame's +Z lands on
-  // (cos b sin a, -sin b, cos b cos a), so a target direction fixes rx and ry.
-  const wrist = childBasis(grip, 0.0250, 0.0140, 0.0440,
-    V(1, 0, 0), V(0, 1, 0), V(0, 0, 1));
-  forearm(m, child(wrist, 0, 0, 0, 0.602, 0.642, 0.10),
-    { r: 0.0228, cuff: 0.0210, len: 0.1200 });
+  /**
+   * Thumb ACROSS the backstrap and down the LEFT flank, pointing forward.
+   *
+   * Not a stylistic choice — it is the only route that puts a thumb in the
+   * picture. A right thumb parked on the right flank by the selector is behind
+   * the receiver from this eye, and one laid high on the left flank at grip
+   * y > +0.02 is inside the lower receiver (which spans |x| < 0.019,
+   * y -0.029..+0.023). At grip (0.006, 0.0218, -0.030) curling down-left it
+   * crosses the backstrap and lands on the flank at about weapon
+   * (-0.017, -0.061, 0.126) — 32 mm below the receiver's floor, in clear air,
+   * directly above the fingertips. A thumb crossing the grip's silhouette above
+   * three fingertips is the whole grip read in one shape.
+   */
+  const th = frameAt(GRIP, 0.0060, 0.0218, -0.0300, [-0.88, -0.16, 0.44], [0.16, 0.92, 0.36]);
+  digit(m, th, { len: 0.0215, thick: 0.0138, curls: [0.30, 0.34, 0.30], tipPad: true });
+
+  // ---- forearm: back, down and outboard toward the right shoulder ----------
+  forearm(m, frameAt(IDENT, 0.0210, -0.1210, 0.1520, [0.30, -0.60, 0.74], [-0.30, 0.62, 0.72]),
+    { r: 0.0236, cuff: 0.0250, len: 0.2400, break: 0.10 });
 }
 
 /* ------------------------------------------------------------ support hand */
 
-function supportHand(m) {
-  const HGZ = -0.1500;
-  // Base frame is world-aligned at the left flank of the handguard (a 38 mm
-  // octagon centred on the bore at y = 0.030, so its surfaces are at |x| = 19 mm
-  // and y = 0.011 .. 0.049).
-  const base = child(IDENT, -0.0215, 0.0300, HGZ, 0, 0, 0);
+/**
+ * The silhouette the support hand actually wraps: handguard PLUS top rail, as
+ * one convex outline in weapon (x, y).
+ *
+ * The handguard is a 38 mm octagon on the bore at y = 0.030 (left flat at
+ * x = -0.019 spanning y 0.0216..0.0384). The rail sits on top, |x| < 0.0106, and
+ * with its polymer cover the top surface is at y = 0.0668. Between the
+ * handguard's upper shoulder and the rail's flank there is a re-entrant notch —
+ * so the outline *bridges* it, from (-0.0190, 0.0384) straight to
+ * (-0.0106, 0.0668). A finger does the same: it spans the notch and touches at
+ * both ends. Following the notch in is how a wrap ends up inside the rail cover.
+ *
+ * Listed in the wrap direction: up the left flank, over the rail, down the far
+ * side.
+ */
+const HG_SEC = [
+  [-0.0084, 0.0104],   // lower-left diagonal, below the flat
+  [-0.0190, 0.0216],   // left flat, bottom
+  [-0.0190, 0.0384],   // left flat, top — start of the bridge
+  [-0.0106, 0.0668],   // rail cover, top-left
+  [0.0106, 0.0668],    // rail cover, top-right
+  [0.0190, 0.0384],    // right flat, top
+  [0.0190, 0.0216],    // right flat, bottom
+];
 
-  m.use('glove');
-  // palm on the upper-left flat, dorsum outboard and visible from the shooter's
-  // eye — this is the hand you actually see in ADS
-  boxG(m, { mat4: child(base, -0.0074, 0.0058, 0.0000, 0, 0, 0.20),
-    w: 0.0200, h: 0.0420, d: 0.0700, c: 0.0030 });
-  // hypothenar heel curling under the handguard
-  boxG(m, { mat4: child(base, 0.0035, -0.0210, 0.0060, 0, 0, 0.35),
-    w: 0.0250, h: 0.0190, d: 0.0620, c: 0.0028 });
-  m.use('pad');
-  // knuckle armour across the back of the hand
-  boxG(m, { mat4: child(base, -0.0148, 0.0090, -0.0060, 0, 0, 0.20),
-    w: 0.0044, h: 0.0300, d: 0.0420, c: 0.0012, simple: true });
+function supportHand(m) {
+  const digits = offsetPath(HG_SEC, 0.0058);
+  const palm = offsetPath(HG_SEC, 0.0115);
+  const knuck = offsetPath(HG_SEC, 0.0128);
 
   /**
-   * The top of the handguard carries the rail, so the support fingers cannot
-   * come over the top the way a bare-handguard C-clamp does. They drop down the
-   * left flank, pass under the bottom flat and come up the right side — frame
-   * +Z points down, curl toward +X.
+   * Rows spread along the bore, index forward. The window z -0.146..-0.074 is
+   * the only clear stretch on this handguard: the left accessory rail stub
+   * occupies z -0.190..-0.142 (out to x = -0.0285), the QD socket sits at
+   * z = -0.150, the handstop at -0.166, and the optic's hood reaches z = -0.045.
+   * Every finger here also stays above y = 0.045, which clears the stub and the
+   * socket outright.
    */
-  const knuckle = (dz) => childBasis(base, -0.0045, -0.0050, dz,
-    V(0, 0, 1), V(-1, 0, 0), V(0, -1, 0));
-  const rows = [-0.0250, -0.0090, 0.0070, 0.0230];
+  const rows = [-0.1430, -0.1225, -0.1020, -0.0815];
+  const lens = [0.0228, 0.0225, 0.0210, 0.0188];
+  // Mid-bridge, so the metacarpal heads ride the handguard/rail shoulder at
+  // (-0.0204, 0.0542) — 9.6 mm clear of the rail web, on the flank the eye sees.
+  const seeds = [0.0530, 0.0530, 0.0538, 0.0552];
+
+  // ---- palm: a band up the left flank onto the shoulder --------------------
+  /**
+   * The single largest camera-facing surface on either hand. It runs from below
+   * the handguard's lower-left diagonal (the hypothenar heel) up the left flat
+   * and onto the bridge, ending under the knuckles, following the octagon's
+   * facets rather than standing off them.
+   */
+  /**
+   * ONE MASS, THREE STEPS, HEAVY OVERLAP — and no second "dorsum" band on top.
+   *
+   * The first pass of this rewrite used a six-step band plus a four-step dorsum
+   * plate. Both run *up* the section while the eye looks *down* the flank, so
+   * every step edge presented as a ledge and the ten of them stacked into a
+   * corrugated ramp: at 5x magnification the support hand read as a pile of
+   * armour plates bolted to the handguard. Fewer, deeper, overlapped steps read
+   * as a palm with a curve in it, and the relief the hand needs comes from the
+   * knuckles and the metacarpals instead — which are transverse to the stack and
+   * therefore add information rather than more of the same.
+   */
+  m.use('glove');
+  bandOnPath(m, palm, {
+    s0: 0.0020, s1: 0.0600, z: -0.1120, steps: 3, overlap: 0.0070,
+    w0: 0.0700, w1: 0.0800, h0: 0.0216, h1: 0.0250,
+  });
+
+  // ---- metacarpals fanning from the wrist onto the knuckle heads -----------
+  /**
+   * Wrist, below-left of the handguard's lower-left diagonal — outside the
+   * section (x < -0.019) and below it (y < 0.011), so nothing of the arm is
+   * inside the furniture, and 6 mm forward of the upper receiver's front face at
+   * z = -0.062 so the sleeve never intersects it.
+   *
+   * Pushed 3 mm further down and left than the first pass, because a 25.7 mm
+   * gauntlet cuff seated at the palm's own heel covered the bottom third of the
+   * palm and the arm appeared to emerge from in front of the handguard rather
+   * than out of the hand.
+   */
+  const wristPt = [-0.0255, -0.0095, -0.0790];
+  const kp = [0, 0, 0, 0, 0, 0];
+  /**
+   * Rubber knuckle armour over the metacarpal heads — four dark blocks on a
+   * lighter glove, 20.5 mm apart along the bore, dead centre of the
+   * camera-facing quadrant. Kept 12.6 mm wide against that 20.5 mm pitch so
+   * there is an 8 mm gap between neighbours: a knuckle row reads from its gaps,
+   * and 16 mm blocks closed those gaps to 4 mm and merged into one bar.
+   */
+  m.use('pad');
   for (let i = 0; i < 4; i++) {
-    finger(m, knuckle(rows[i]), {
-      len: 0.0198 - i * 0.0010, thick: 0.0104 - i * 0.0004,
-      curls: [0.55 + i * 0.04, 1.05, 0.95 - i * 0.05], pad: true,
+    knuck.at(seeds[i], kp);
+    boxG(m, { mat4: frameAt(IDENT, kp[0], kp[1], rows[i], [0, 0, 1], [kp[4], kp[5], 0]),
+      w: 0.0126, h: 0.0140, d: 0.0086, c: 0.0016, simple: true });
+  }
+  // Metacarpals converging on those four heads, kept low so they modulate the
+  // palm rather than competing with the knuckles.
+  m.use('glove');
+  for (let i = 0; i < 4; i++) {
+    knuck.at(seeds[i], kp);
+    ridge(m, IDENT, wristPt, [kp[0], kp[1], rows[i]], 0.0032, 0.0026, [-0.90, 0.44, 0]);
+  }
+
+  // ---- the wrap: bridge the shoulder, cross the rail, down the far side ----
+  m.use('glove');
+  for (let i = 0; i < 4; i++) {
+    const w = wrapDigit(digits, seeds[i], phalanges(lens[i]));
+    digit(m, frameAt(IDENT, w.p[0], w.p[1], rows[i], [w.dir[0], w.dir[1], 0], [w.back[0], w.back[1], 0]), {
+      len: lens[i], thick: 0.0114 - i * 0.0005, curls: w.curls, pad: true,
     });
   }
-  // Thumb lies along the top-left of the handguard beside the rail, pointing
-  // forward — the tell that reads as a deliberate support grip.
-  const th = childBasis(base, -0.0110, 0.0190, -0.0240,
-    V(0, 1, 0), V(1, 0, 0), V(0, 0, -1));
-  finger(m, th, { len: 0.0208, thick: 0.0124, curls: [0.20, 0.16, 0.14], pad: false });
 
-  // Wrist back toward the left shoulder: rearward, down and inboard.
-  const wrist = childBasis(base, -0.0080, -0.0140, 0.0330,
-    V(1, 0, 0), V(0, 1, 0), V(0, 0, 1));
-  // `forearm` sweeps a round section and takes a radius. This call site still
-  // carried the box section (w 31 mm x h 41 mm) from before the forearm was
-  // converted from a prism, so `o.r` was undefined and every vertex of the
-  // support sleeve came out NaN. Radius is the mean half-extent of that section.
-  forearm(m, child(wrist, 0, 0, 0, 0.706, -0.557, -0.16),
-    { r: 0.0180, cuff: 0.0200, len: 0.1350 });
+  /**
+   * Thumb forward along the upper-left, beside the rail — the "thumb over bore"
+   * cue, and the one digit silhouetted against the world rather than against the
+   * weapon in every pose. It runs from the web at z = -0.1380 forward to about
+   * z = -0.1930 at y 0.046..0.055, which threads above the accessory rail stub
+   * (top at y = 0.041) and outboard of the folded front iron (|x| < 0.0065).
+   */
+  const tf = frameAt(IDENT, -0.0244, 0.0452, -0.1380, [0.05, 0.11, -0.99], [-0.90, 0.42, 0]);
+  digit(m, tf, { len: 0.0224, thick: 0.0136, curls: [0.13, 0.12, 0.15], tipPad: true });
+
+  // ---- forearm: down, left and back, off the bottom-left corner ------------
+  forearm(m, frameAt(IDENT, wristPt[0], wristPt[1], wristPt[2],
+    [-0.60, -0.66, 0.45], [-0.74, 0.62, 0.26]),
+    { r: 0.0192, cuff: 0.0250, len: 0.3000, break: 0.18, foldPhase: 0.9 });
 }
 
 /* ------------------------------------------------------------------ build */
 
+/**
+ * @returns {{ group, meshes, triangles, right, left }}
+ *
+ * The two hands get their own Mesher and their own sub-group. That costs three
+ * extra draw calls and buys the ability to ablate one hand at a time from the
+ * screenshot rig — which is the tool that finally located this defect, after
+ * four rounds in which "the geometry is there and it projects into frame" was
+ * accepted as evidence that it was on screen.
+ */
 export function buildHands(mats) {
   const group = new THREE.Group();
   group.name = 'vm:hands';
-  const m = new Mesher();
-  firingHand(m);
-  supportHand(m);
-
   const meshes = [];
-  for (const [key, geo] of m.geometries()) {
-    const mesh = new THREE.Mesh(geo, mats[key] ?? mats.glove);
-    mesh.name = `vm:hand:${key}`;
-    mesh.castShadow = false;
-    mesh.receiveShadow = false;
-    mesh.frustumCulled = false;
-    group.add(mesh);
-    meshes.push(mesh);
+  let triangles = 0;
+  const out = {};
+
+  for (const [side, build] of [['right', firingHand], ['left', supportHand]]) {
+    const m = new Mesher();
+    build(m);
+    const sub = new THREE.Group();
+    sub.name = `vm:hand:${side}`;
+    for (const [key, geo] of m.geometries()) {
+      const mesh = new THREE.Mesh(geo, mats[key] ?? mats.glove);
+      mesh.name = `vm:hand:${side}:${key}`;
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
+      mesh.frustumCulled = false;
+      sub.add(mesh);
+      meshes.push(mesh);
+    }
+    triangles += m.triangleCount();
+    group.add(sub);
+    out[side] = sub;
   }
-  return { group, meshes, triangles: m.triangleCount() };
+
+  return { group, meshes, triangles, right: out.right, left: out.left };
 }

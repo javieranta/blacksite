@@ -149,6 +149,20 @@ export function sandbagBag(rng, variant) {
       z += Math.sign(w) * 0.0105;
       y -= Math.sign(v) * 0.0045;
     }
+    /*
+     * THE SIDE SEAM. A sack is a folded tube with a sewn seam running its whole
+     * length at the widest line, and that seam is the strongest boundary cue a
+     * stacked wall has: it is a hard horizontal crease that catches the key
+     * light along every bag, so even when two neighbours are the same colour the
+     * eye still counts two bags. Without it the plateau blends straight into the
+     * belly and a course reads as extruded profile — which is exactly the "one
+     * moulded mass" failure.
+     */
+    if (aw > 0.86 && av < 0.5) {
+      const along = 1 - smoothstep(0.62, 1.0, au);
+      z += Math.sign(w) * 0.0135 * along;
+      y -= 0.0045 * along;
+    }
     // The crown dips very slightly between the bags underneath.
     if (v > 0.2) y -= 0.005 * (1 - au * au);
 
@@ -200,18 +214,29 @@ function weatherBag(geo, rng) {
     const up = Math.max(0, nrm.getY(i));
     const h = Math.min(1, Math.max(0, (y - bb.min.y) / span));
 
-    // Dust settles on whatever faces the sky, and the crown collects the most.
-    const dust = Math.pow(up, 1.5) * (0.30 + 0.70 * h);
-    // The belly is permanently damp, shaded and dirt-splashed.
+    /*
+     * Dust settles on whatever faces the sky, and the crown collects the most.
+     *
+     * The round-6 balance had this at 0.37 up / 0.25 down, and against the
+     * hessian albedo plus the wall's own damp multipliers that landed the whole
+     * revetment in a 20%-value band of muddy brown: individually modelled bags
+     * that still read as one object, because the eye separates surfaces by
+     * VALUE long before it separates them by silhouette. Widening the within-bag
+     * range to 0.52 up / 0.15 down puts roughly a stop and a half between a
+     * bag's chalky crown and its shaded belly, which is what a real revetment
+     * looks like and what makes each bag legible at 8 m.
+     */
+    const dust = Math.pow(up, 1.4) * (0.34 + 0.66 * h);
+    // The belly is shaded and dirt-splashed — but not black.
     const wet = (1 - h) * (1 - h) * (1 - up * 0.65);
     // Low-frequency blotching: slumped fill, patched dirt, uneven sun bleach.
     const blot = Math.sin(x * 9.3 + ph) * Math.sin(z * 11.7 - ph * 0.7)
       * Math.sin(y * 6.1 + ph * 1.9);
-    const stain = blot * 0.065;
+    const stain = blot * 0.085;
 
-    col[i * 3] = 1 + 0.370 * dust - 0.250 * wet + stain;
-    col[i * 3 + 1] = 1 + 0.330 * dust - 0.230 * wet + stain * 0.88;
-    col[i * 3 + 2] = 1 + 0.235 * dust - 0.185 * wet + stain * 0.66;
+    col[i * 3] = 1 + 0.520 * dust - 0.150 * wet + stain;
+    col[i * 3 + 1] = 1 + 0.475 * dust - 0.140 * wet + stain * 0.88;
+    col[i * 3 + 2] = 1 + 0.360 * dust - 0.115 * wet + stain * 0.66;
   }
   geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
   return geo;
@@ -347,10 +372,10 @@ function course(out, rng, {
  * occupancy grid and with it the composition of the whole level.
  */
 function push(out, bag) {
-  bag.odd = bagHash(bag, 5) < 0.09 ? (bagHash(bag, 6) * BAG_ODDITIES.length) | 0 : -1;
+  bag.odd = bagHash(bag, 5) < 0.115 ? (bagHash(bag, 6) * BAG_ODDITIES.length) | 0 : -1;
   // Damp wicks up from the ground independently of which course a bag is in —
   // see `rise` in course(). Same reasoning as `odd` for using the hash.
-  if (bag.rise) bag.dark *= 1 - 0.15 * bag.rise * (0.55 + bagHash(bag, 7) * 0.45);
+  if (bag.rise) bag.dark *= 1 - 0.11 * bag.rise * (0.55 + bagHash(bag, 7) * 0.45);
   out.push(bag);
   return bag;
 }
@@ -366,7 +391,7 @@ function spill(out, rng, { count, halfX, side = -1 }) {
       hue: rng.int(0, BAG_TINTS.length - 1),
       // A bag lying in the puddle at the foot of the wall is the wettest thing
       // in the shot.
-      dark: rng.range(0.66, 0.80),
+      dark: rng.range(0.74, 0.88),
       course: 0, ground: true,
     });
   }
@@ -471,10 +496,11 @@ const _IDENT = new THREE.Quaternion();
  * entries were added in round 5 so a wall is not one hue at five values.
  */
 export const BAG_TINTS = [
-  new THREE.Color(0xd6c9a8), new THREE.Color(0xbcae8c),
-  new THREE.Color(0xa89e7f), new THREE.Color(0x968b6d),
+  new THREE.Color(0xefe2bd), new THREE.Color(0xd6c9a8),
+  new THREE.Color(0xbcae8c), new THREE.Color(0xa89e7f),
+  new THREE.Color(0x968b6d), new THREE.Color(0xc6bb90),
   new THREE.Color(0xb6ad85), new THREE.Color(0xa39a78),
-  new THREE.Color(0x94896c),
+  new THREE.Color(0x8a7f61),
 ];
 
 /**
@@ -523,8 +549,17 @@ function bagAlbedo(b, jitter) {
   _tint.copy(b.odd >= 0
     ? BAG_ODDITIES[b.odd % BAG_ODDITIES.length]
     : BAG_TINTS[b.hue % BAG_TINTS.length]);
-  const value = b.dark * jitter * (0.92 + bagHash(b, 1) * 0.16);
-  const warm = (bagHash(b, 2) * 2 - 1) * 0.08;
+  /*
+   * Value spread was +/-8% and the palette spanned 1.45:1, which sounds like
+   * variety and is not: multiplied into the forge's olive jute albedo and then
+   * through the damp terms, the whole wall landed inside a 20% band and the
+   * round-6 review called it "one flat colour". It is now +/-14% on a palette
+   * spanning 2.0:1, lifted 8% so a bleached crown bag sits at sand rather than
+   * khaki. That is still a multiplier below 1 for every bag except the palest,
+   * so a golden key cannot blow the wall out to cream the way round 4 did.
+   */
+  const value = b.dark * jitter * (0.86 + bagHash(b, 1) * 0.28) * 1.08;
+  const warm = (bagHash(b, 2) * 2 - 1) * 0.11;
   return _tint.setRGB(
     Math.max(0.02, _tint.r * value * (1 + warm)),
     Math.max(0.02, _tint.g * value * (1 + warm * 0.22)),
@@ -612,23 +647,50 @@ export function placeWallModule(api, mod, x, z, yaw, { keys, groundFlag = 1 } = 
  * The bags are squashed and splayed like the wall bags so the two kits never
  * look like different props.
  */
-export function bagsOnTop(api, keys, x, y, z, yaw, count, flags = 0) {
+export function bagsOnTop(api, keys, x, y, z, yaw, count, flags = 0, opts = null) {
   const { batcher, rng } = api;
   if (!keys?.length) return 0;
+  /*
+   * `opts` exists so the same row generator can lay a whole BLOCK of bags and
+   * not just one row: `across` shifts the row sideways across the barrier and
+   * `pitch` tightens the along-run spacing. Both default to the single-row
+   * behaviour every existing caller relies on. See parts/BagCap.js.
+   */
+  const acrossBias = opts?.across ?? 0;
+  const pitch = opts?.pitch ?? 0.38;
+  const runBias = opts?.run ?? 0;
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
   let made = 0;
   for (let i = 0; i < count; i++) {
     const key = keys[rng.int(0, keys.length - 1)];
-    _e.set(rng.jit(0.07), yaw + rng.jit(0.30), rng.jit(0.07));
+    /*
+     * A row of bags weighting a barrier is the single most-photographed piece
+     * of the sandbag kit — it sits at eye level in the mid-ground of the hero
+     * framings — and until now it was laid out as identical pillows on a
+     * straight 44 cm pitch, which is the arrangement that reads as "three vague
+     * lumps" from 10 m however good the individual bag is.
+     *
+     * Three fixes, all free: alternate a HEADER (bag turned across the barrier,
+     * end showing) into the row so the silhouette is not one repeated profile;
+     * pitch at 0.38 so neighbours OVERLAP and press into each other instead of
+     * sitting in a neat line; and offset across the barrier as well as along it
+     * so the row is not perfectly collinear.
+     */
+    const header = i % 2 === 1;
+    const along = (i - (count - 1) / 2) * pitch + runBias + rng.jit(0.04);
+    const across = acrossBias + rng.jit(0.055);
+    _e.set(rng.jit(0.10), yaw + (header ? Math.PI / 2 : 0) + rng.jit(0.26), rng.jit(0.12));
     _q.setFromEuler(_e);
-    const size = rng.range(0.93, 1.07);
-    _s.set(size * 1.03, size * rng.range(0.86, 0.94), size * 1.08);
-    _v.set(x + (i - (count - 1) / 2) * 0.44 + rng.jit(0.03), y + 0.004, z + rng.jit(0.03));
+    const size = rng.range(0.92, 1.08);
+    const squash = rng.range(0.82, 0.94);
+    _s.set(size * (1 + (1 - squash) * 0.6), size * squash, size * (1 + (1 - squash) * 0.9));
+    _v.set(x + along * cy + across * sy, y + 0.004, z - along * sy + across * cy);
     _m.compose(_v, _q, _s);
     // Exactly two draws from the caller's stream, as before — see bagHash.
     const hue = rng.int(0, BAG_TINTS.length - 1);
     const jitter = rng.range(0.9, 1.05);
     const rec = { x: _v.x, z: _v.z, course: i, hue, odd: -1, dark: 1 };
-    if (bagHash(rec, 3) < 0.1) rec.odd = (bagHash(rec, 4) * BAG_ODDITIES.length) | 0;
+    if (bagHash(rec, 3) < 0.14) rec.odd = (bagHash(rec, 4) * BAG_ODDITIES.length) | 0;
     batcher.add(key, _m, 1, bagAlbedo(rec, jitter), flags);
     made++;
   }

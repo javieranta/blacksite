@@ -29,10 +29,27 @@ import { Emitter, EFFECTS } from './particles/Effects.js';
  * elongated along the screen-space velocity and anchored so its head sits on the
  * particle, which is what turns a dot into a streak.
  *
- * Emissive brightness runs far above 1.0 (a muzzle core is ~42) because PostFX
+ * Emissive brightness runs far above 1.0 (a muzzle core is ~46) because PostFX
  * composites in linear HDR and tonemaps last; anything clamped to 1.0 ends up
  * darker than sunlit concrete and disappears in the grade.
+ *
+ * A discharge also fires a real pooled point light through the `lighting` seam.
+ * Additive sprites brighten the pixels they cover and nothing else; without the
+ * light the ground under the barrel, the crate beside it and the weapon itself
+ * stay exactly as dark as they were, which is the single clearest tell that a
+ * muzzle flash is a decal rather than an event.
  */
+
+/**
+ * Muzzle light. 5500K (a discharge is close to daylight white; the *smoke* is
+ * what is orange), spiked and gone inside ~45 ms, with the cutoff pinned to 6 m
+ * so it is a pool at the shooter's feet and not a second sun over the courtyard.
+ * FlashPool derives its own cutoff from the peak intensity, which for a spike
+ * this bright would reach 60 m — hence the explicit override on the returned
+ * light. Peak is in candela: at 1.5 m that is ~19 lux against a golden-hour sun
+ * of ~3.4, so it dominates locally and vanishes by the far side of the yard.
+ */
+const MUZZLE_LIGHT = { colour: 0xffe9d2, peak: 42, radius: 6.0, decay: 0.045 };
 export class Particles {
   constructor() {
     this.name = 'particles';
@@ -61,6 +78,9 @@ export class Particles {
 
   init(ctx) {
     this.ctx = ctx;
+    // Registered before us, so this is resolved once rather than per shot.
+    this.lighting = ctx.get('lighting');
+    this.level = ctx.get('level');
 
     const t0 = performance.now();
     this.atlas = buildSpriteAtlas(1024);
@@ -180,18 +200,48 @@ export class Particles {
     tint[0] = 1; tint[1] = 1; tint[2] = 1;
     this.emitter.lod = 1;
     EFFECTS.muzzle(this.emitter, o);
+
+    // The part no billboard can do: actually light the scene.
+    const light = this.lighting?.flash?.(
+      this._muzzle, MUZZLE_LIGHT.colour, MUZZLE_LIGHT.peak, MUZZLE_LIGHT.decay,
+    );
+    if (light) light.distance = MUZZLE_LIGHT.radius;
   }
 
   _onShell(e) {
-    const p = e?.point ?? this._muzzle;
     const o = this._o;
-    o.px = p.x; o.py = p.y; o.pz = p.z;
+    // Spawn on the ejection port of the *drawn* weapon. The shooter's event
+    // carries a point offset from the eye, which is metres out of place once the
+    // viewmodel's own FOV is taken into account — brass appeared to leave from
+    // open air well clear of the gun.
+    if (this._ejectPosition(this._v)) {
+      o.px = this._v.x; o.py = this._v.y; o.pz = this._v.z;
+    } else {
+      const p = e?.point ?? this._muzzle;
+      o.px = p.x; o.py = p.y; o.pz = p.z;
+    }
     const v = e?.velocity;
-    o.vx = v?.x ?? 1.7; o.vy = v?.y ?? 1.5; o.vz = v?.z ?? 0.4;
-    o.floorY = e?.floorY;
+    o.vx = v?.x ?? 2.7; o.vy = v?.y ?? 1.9; o.vz = v?.z ?? -0.55;
+    o.floorY = e?.floorY ?? this._groundY(o.px, o.pz);
     o.scale = 1;
+    o.count = undefined;
+    o.distance = 0;
+    const tint = this.emitter.tint;
+    tint[0] = 1; tint[1] = 1; tint[2] = 1;
     this.emitter.lod = 1;
     EFFECTS.shell(this.emitter, o);
+  }
+
+  /**
+   * Ground height under a point, so brass has something to bounce off. One BVH
+   * raycast per ejection (~10/s at cyclic rate) and no allocation — `heightAt`
+   * returns a number.
+   */
+  _groundY(x, z) {
+    if (!this.level?.heightAt) return undefined;
+    const h = this.level.heightAt(x, z);
+    // 6mm clearance: a case lying on concrete is not buried in it.
+    return Number.isFinite(h) ? h + 0.006 : undefined;
   }
 
   /** A tracer only makes sense between a muzzle we just saw and this impact. */
@@ -213,30 +263,60 @@ export class Particles {
   }
 
   /**
-   * Where the barrel actually is. The viewmodel lives in its own scene with a
-   * narrower FOV, so a point taken straight from it projects nearer the screen
-   * centre than the gun the player sees. Rescaling the lateral offset by the
-   * ratio of the two half-FOV tangents puts world-space smoke exactly on the
-   * drawn muzzle instead of a few dozen pixels inside it.
+   * Take a world point read off the viewmodel and move it to where the player
+   * actually sees that part of the gun.
+   *
+   * Both cameras share a transform, so a point P in camera space is drawn by the
+   * viewmodel camera at ndc = (P.xy / -P.z) / tan(vmFov/2), while a world sprite
+   * at Q lands at (Q.xy / -Q.z) / tan(camFov/2). Holding z and equating the two
+   * gives Q.xy = P.xy * tan(camFov/2) / tan(vmFov/2) — the WORLD tangent over the
+   * VIEW tangent. The narrower viewmodel FOV magnifies, so the world sprite has
+   * to move OUTWARD from the screen centre to catch up with the drawn gun.
+   *
+   * This ratio used to be the other way up, which pulled every muzzle effect
+   * ~24% toward the crosshair instead of pushing it ~32% out: with an 80-degree
+   * world FOV against the 65-degree viewmodel that is a compound error of 1.7x,
+   * and it is why the flash sat in open air up and left of the barrel rather than
+   * on the crown of it.
    */
-  _muzzlePosition(out) {
+  _viewToWorld(out) {
     const ctx = this.ctx;
-    const muzzle = ctx.get('viewmodel')?.rig?.muzzle;
     const cam = ctx.camera;
-    if (!muzzle) {
-      out.copy(cam.position).addScaledVector(this._muzzleDir, 0.55);
-      return out;
-    }
-    muzzle.updateWorldMatrix(true, false);
-    out.setFromMatrixPosition(muzzle.matrixWorld);
     this._mat.copy(cam.matrixWorld).invert();
     out.applyMatrix4(this._mat);
     const kv = Math.tan(THREE.MathUtils.degToRad(ctx.viewCamera.fov * 0.5));
     const kw = Math.tan(THREE.MathUtils.degToRad(cam.fov * 0.5));
-    const k = kw > 1e-5 ? kv / kw : 1;
+    const k = kv > 1e-5 ? kw / kv : 1;
     out.x *= k; out.y *= k;
     out.applyMatrix4(cam.matrixWorld);
     return out;
+  }
+
+  /** Where the barrel actually is. */
+  _muzzlePosition(out) {
+    const muzzle = this.ctx.get('viewmodel')?.rig?.muzzle;
+    if (!muzzle) {
+      out.copy(this.ctx.camera.position).addScaledVector(this._muzzleDir, 0.55);
+      return out;
+    }
+    muzzle.updateWorldMatrix(true, false);
+    out.setFromMatrixPosition(muzzle.matrixWorld);
+    return this._viewToWorld(out);
+  }
+
+  /**
+   * Where a spent case leaves the gun. `rig.ejectPort` is a plain point in the
+   * weapon's own frame — the front lip of the port — so it has to go through the
+   * rig's world matrix and then the same lateral rescale as the muzzle.
+   * @returns {boolean} false when there is no viewmodel to read it from.
+   */
+  _ejectPosition(out) {
+    const rig = this.ctx.get('viewmodel')?.rig;
+    if (!rig?.ejectPort || !rig.root) return false;
+    rig.root.updateWorldMatrix(true, false);
+    out.copy(rig.ejectPort).applyMatrix4(rig.root.matrixWorld);
+    this._viewToWorld(out);
+    return true;
   }
 
   // ───────────────────────────────────────────────────────────── per-frame ──

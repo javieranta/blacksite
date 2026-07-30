@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { RENDER, TIME_OF_DAY } from '../core/Constants.js';
 import { applyShadowPatch, shadowPatchActive } from './lighting/ShadowShaderPatch.js';
 import { applyIrradiancePatch, irradiancePatchActive } from './lighting/IrradiancePatch.js';
+import { applySpecularClamp, specularClampActive } from './lighting/SpecularClampPatch.js';
 import { CascadedShadowMap } from './lighting/CascadedShadowMap.js';
 import { EnvironmentBuilder } from './lighting/EnvironmentBuilder.js';
 import { SkyRadianceModel, RADIANCE_GAIN } from './lighting/SkyRadianceModel.js';
@@ -10,6 +11,7 @@ import { Practicals } from './lighting/Practicals.js';
 import { AperturePortals } from './lighting/AperturePortals.js';
 import { FlashPool } from './lighting/FlashPool.js';
 import { rigFor, keyOfPreset } from './lighting/LightRigs.js';
+import { EnclosureProbe } from './lighting/EnclosureProbe.js';
 
 /**
  * OWNER: lighting agent.
@@ -80,15 +82,10 @@ export class Lighting {
     this.shPatched = false;
     this._materialsLive = false;
 
-    // Enclosure probe state — see _probeEnclosure().
+    // Enclosure: 0 outdoors, 1 inside a building. See lighting/EnclosureProbe.js.
+    this.enclosure = new EnclosureProbe();
     this._interior = 0;
-    this._interiorTarget = 0;
-    this._probeTimer = 0;
-    this._probeOrigin = new THREE.Vector3();
-    this._probeRay = new THREE.Raycaster();
-    this._probeRay.firstHitOnly = true;
-    /** Reused hit buffer: intersectObject allocates a fresh array otherwise. */
-    this._probeHits = [];
+
     /** Reused scattering-medium record so _blendMedium never allocates. */
     this._medium = {
       density: 0.016, intensity: 0.55, anisotropy: 0.76,
@@ -107,6 +104,11 @@ export class Lighting {
     // `?csmdebug=1..8` paints a diagnostic instead of the shadow term (see
     // ShadowShaderPatch.js for the table); `=9` leaves three's stock PCF alone.
     this._csmDebug = params.has('csmdebug') ? parseInt(params.get('csmdebug'), 10) || 0 : 0;
+    // `?keyelev=N` overrides the active rig's key-light elevation floor. Whether a
+    // preset's sun is high enough to lay a legible shadow *pattern* on the yard
+    // (rather than putting all of it inside one shadow) can only be settled by
+    // sweeping it and looking, and that sweep is worth being able to repeat.
+    this._keyElevation = params.has('keyelev') ? parseFloat(params.get('keyelev')) : null;
 
     // ---- cascaded shadow maps ----------------------------------------------
     // Built BEFORE the shader patch: the patch bakes this rig's per-cascade
@@ -123,6 +125,27 @@ export class Lighting {
 
     // ---- shader-level shadow upgrade ---------------------------------------
     this._syncShadowPatch(false);
+
+    // ---- shader-level specular headroom -------------------------------------
+    // Also before anything compiles. Patches `common`, `lights_physical_fragment`
+    // and `aomap_fragment` — three chunks no other patch in the project touches.
+    //
+    // `?spec=knee,span,metalFloor,kappa` overrides the calibration without an
+    // edit, and `?specdebug=1|2|3` ablates the two specular terms — see
+    // SpecularClampPatch.js. Both exist because the round-7 build had a live
+    // clamp and a clipped image at the same time, and the only way to tell which
+    // term was responsible was to sweep and to ablate.
+    this._specular = { ...SPECULAR, debug: parseInt(params.get('specdebug'), 10) || 0 };
+    if (params.has('spec')) {
+      const [k, sp, mf, kap] = params.get('spec').split(',').map(Number);
+      if (Number.isFinite(k)) this._specular.knee = k;
+      if (Number.isFinite(sp)) this._specular.span = sp;
+      if (Number.isFinite(mf)) this._specular.metalRoughnessFloor = mf;
+      if (Number.isFinite(kap)) this._specular.normalVarianceKappa = kap;
+    }
+    applySpecularClamp(this._specular);
+    this.specClamped = specularClampActive();
+
     /** @type {THREE.DirectionalLight} contract handle */
     this.sun = this.csm.sun;
     this.sunDirection = this.csm.sunDirection;
@@ -174,7 +197,11 @@ export class Lighting {
       depthScale: 0.5,
       marchScale: 0.25,
     });
-    this.volumetrics.strength = RENDER.volumetricIntensity * 1.5;
+    // `?volmul=N` scales the shaft term. Whether a shaft reads is a *contrast*
+    // question against whatever is behind it, which no amount of arithmetic
+    // settles — it has to be swept and looked at.
+    this._volMul = params.has('volmul') ? Math.max(0, parseFloat(params.get('volmul'))) : 1;
+    this.volumetrics.strength = RENDER.volumetricIntensity * 1.5 * this._volMul;
 
     // ---- initial state -----------------------------------------------------
     this._presetKey = keyOfPreset(sky?.preset) ?? 'golden';
@@ -221,9 +248,12 @@ export class Lighting {
     // Below the horizon the sun cannot be the key light. Swap in the moon so
     // every silhouette keeps a rim instead of dissolving into the background.
     const isMoon = !!rig.moon || this._dir.y < 0.015;
+    const keyElevation = this._keyElevation ?? rig.keyElevation;
     if (isMoon) {
       const m = rig.moon ?? { elevation: 34, azimuth: (preset.azimuth + 180) % 360 };
       Lighting.directionFrom(m.elevation, m.azimuth, this._dir);
+    } else if (keyElevation !== undefined && keyElevation !== null) {
+      Lighting.liftElevation(this._dir, keyElevation);
     }
 
     const srcColour = colour ?? this.sky?.sunColour;
@@ -378,45 +408,12 @@ export class Lighting {
   }
 
   /**
-   * Is the camera under a roof? A fan of upward raycasts against the level
-   * colliders, amortised. Cheap, exact, and it needs no cooperation from the
-   * level agent beyond the `colliders` group the contract already guarantees.
-   *
-   * See ROOF_PROBES for a measured limitation of this test that is left in
-   * place on purpose.
+   * Refresh the enclosure measurement. Delegated because the discriminating test
+   * and the calibration table behind it are a page of their own — see
+   * lighting/EnclosureProbe.js.
    */
   _probeEnclosure(dt) {
-    this._probeTimer -= dt;
-    if (this._probeTimer > 0) {
-      // Ease toward the last measurement so walking through a doorway ramps the
-      // medium rather than snapping it.
-      const k = 1 - Math.exp(-dt * 2.4);
-      this._interior += (this._interiorTarget - this._interior) * k;
-      return;
-    }
-    this._probeTimer = 0.2;
-
-    const level = this.ctx.get('level');
-    const colliders = level?.colliders;
-    if (!colliders || colliders.children.length === 0) { this._interiorTarget = 0; return; }
-
-    this.ctx.camera.getWorldPosition(this._probeOrigin);
-    this._probeOrigin.y += 0.4;
-    let covered = 0;
-    const hits = this._probeHits;
-    for (let i = 0; i < ROOF_PROBES.length; i++) {
-      this._probeRay.set(this._probeOrigin, ROOF_PROBES[i]);
-      this._probeRay.near = 0.5;
-      this._probeRay.far = ROOF_REACH;
-      hits.length = 0;
-      this._probeRay.intersectObject(colliders, true, hits);
-      if (hits.length) covered++;
-    }
-    hits.length = 0;
-    // 0 below ROOF_OPEN of the fan blocked, 1 at ROOF_SEALED and above.
-    this._interiorTarget = THREE.MathUtils.clamp(
-      (covered / ROOF_PROBES.length - ROOF_OPEN) / (ROOF_SEALED - ROOF_OPEN), 0, 1,
-    );
+    this._interior = this.enclosure.update(dt, this.ctx.camera, this.ctx.get('level')?.colliders);
   }
 
   _inferQuality(quality) {
@@ -608,6 +605,32 @@ export class Lighting {
 
   // -------------------------------------------------------------------------
 
+  /**
+   * Raise a sun direction to at least `minElevationDeg`, keeping its azimuth.
+   * A no-op when the sun is already higher than the floor.
+   *
+   * Why the rig needs this at all: below roughly 20 deg the compound's own
+   * massing puts the whole courtyard inside one cast shadow — a 10 m wall throws
+   * 51 m at 11 deg — so the floor carries no shadow *pattern*, only a uniform
+   * shade, however good the light ratio is. See the SEAM NOTE in LightRigs.js:
+   * the altitude the sky draws its disc at is not lifted with it, because that
+   * value lives in a file this agent does not own.
+   *
+   * @param {THREE.Vector3} dir normalised, pointing toward the sun (mutated)
+   * @param {number} minElevationDeg
+   */
+  static liftElevation(dir, minElevationDeg) {
+    const wantY = Math.sin(THREE.MathUtils.degToRad(minElevationDeg));
+    if (dir.y >= wantY) return dir;
+    const horiz = Math.hypot(dir.x, dir.z);
+    if (horiz < 1e-5) return dir;
+    const scale = Math.sqrt(Math.max(0, 1 - wantY * wantY)) / horiz;
+    dir.x *= scale;
+    dir.z *= scale;
+    dir.y = wantY;
+    return dir.normalize();
+  }
+
   static directionFrom(elevationDeg, azimuthDeg, out) {
     const el = THREE.MathUtils.degToRad(elevationDeg);
     const az = THREE.MathUtils.degToRad(azimuthDeg);
@@ -626,45 +649,61 @@ export class Lighting {
  * CascadedShadowMap.filterTexels(), because a texel-space radius is meaningless
  * without knowing how many millimetres that cascade's texel covers.
  */
+/**
+ * Specular headroom, applied to every material in the project by
+ * lighting/SpecularClampPatch.js. Sweep it live with `?spec=knee,span,floor,kappa`.
+ *
+ * `knee` and `span` are in scene-linear units, i.e. the same units the light
+ * intensities in LightRigs are authored in, read *before* exposure and tone
+ * mapping. They are therefore only meaningful against the tone curve PostFX
+ * applies, and the round-7 numbers (knee 2.6, asymptotic ceiling 9.0) were wrong
+ * for two reasons: 2.6 is already 8-bit code ~238 so the compression only
+ * engaged after the tone mapper had done its own compressing, and an asymptote at
+ * 9.0 — reachable independently by the direct AND the indirect term, so really 18 —
+ * turned every highlight in the project into one value. Measured on the round-7
+ * `interior` capture: 221 consecutive pixels at or above code 252 along the
+ * foreground pipe.
+ *
+ * `span` is now the softness of a *logarithmic* knee rather than the distance to
+ * a ceiling; see SpecularClampPatch.js for why an asymptote cannot fix a plateau.
+ * The knee is deliberately LOW — around code 200 rather than 240 — because the
+ * only place compression buys anything is *below* the tone curve's shoulder,
+ * where 8-bit code values are still moving with radiance.
+ *
+ * Measured on `interior`, across the foreground pipe at y = 762, before -> after:
+ * the longest run at or above code 252 goes 221 px -> 0 px, the band's peak goes
+ * 255 -> 243, and the rust pattern is legible through the highlight in a 1.4x
+ * crop where previously the band contained no detail at all. Swept: knee/span of
+ * 1.10/2.30 leaves a 71 px run at 248+, 0.85/1.25 leaves 3 px, 0.60/0.85 leaves
+ * none, and 0.45/0.60 only dims the whole band by a further 5 codes without
+ * flattening it any less — which is where the curve stops earning anything and
+ * starts costing the metal its brightness.
+ *
+ * `metalRoughnessFloor` is the one number a material author cannot be trusted
+ * with: outdoor industrial steel is never smoother than about a third, and below
+ * that the solar lobe is narrow enough to deliver the disc's radiance almost
+ * undiluted to a band of pixels.
+ *
+ * `normalVarianceKappa` caps the roughness the geometric specular-AA filter may
+ * add, in GGX alpha. 0.12 means a surface whose normal turns a full radian
+ * across one pixel is shaded at roughness >= sqrt(0.12) = 0.35 however smooth
+ * its map says it is; that is the correction that gives the highlight on a pipe a
+ * soft edge instead of a hard step. Zero disables the filter.
+ */
+Lighting.SPECULAR = {
+  knee: 0.60,
+  span: 0.85,
+  metalRoughnessFloor: 0.34,
+  normalVarianceKappa: 0.12,
+};
+const SPECULAR = Lighting.SPECULAR;
+
 Lighting.SHADOW_TUNING = {
   cinematic: { blockerTaps: 12, filterTaps: 24, borderFade: 0.045, rpdbClamp: 0.0012, searchSpan: 0.040 },
   high:      { blockerTaps: 10, filterTaps: 18, borderFade: 0.045, rpdbClamp: 0.0012, searchSpan: 0.038 },
   medium:    { blockerTaps: 6,  filterTaps: 12, borderFade: 0.050, rpdbClamp: 0.0015, searchSpan: 0.034 },
   low:       { blockerTaps: 4,  filterTaps: 8,  borderFade: 0.060, rpdbClamp: 0.0020, searchSpan: 0.030 },
 };
-
-/**
- * Directions the enclosure probe fires along. Straight up plus four splayed
- * casts.
- *
- * KNOWN LIMITATION, measured, left in place deliberately. This fan reports 0.92
- * for the open combat courtyard and 0.92 for the west hall — it cannot tell the
- * two apart, because the yard is roofed by pipe racks and gantries while the
- * hall's roof has large openings, so both block about the same fraction of a
- * narrow upward fan. Widening the fan to 55 deg over twelve rays was tried and
- * is worse: it drags BOTH to 0.43, which costs the hall its interior medium
- * (and with it the window shafts) without making the yard read as outdoor.
- *
- * Telling them apart needs a signal a ray fan does not carry — continuity of the
- * occluding surface, or horizontal enclosure — so the honest fix is a level-side
- * volume tag rather than a cleverer probe. Until that seam exists, erring toward
- * "interior" is the right failure: the yard picking up a slightly denser medium
- * is a haze note, whereas the hall losing its medium is a missing feature.
- */
-const ROOF_PROBES = [
-  new THREE.Vector3(0, 1, 0),
-  new THREE.Vector3(0.42, 0.91, 0).normalize(),
-  new THREE.Vector3(-0.42, 0.91, 0).normalize(),
-  new THREE.Vector3(0, 0.91, 0.42).normalize(),
-  new THREE.Vector3(0, 0.91, -0.42).normalize(),
-];
-
-/** Metres. A hit further up than this is a crane or a tower, not a ceiling. */
-const ROOF_REACH = 26;
-/** Blocked fraction at which the camera starts to count as enclosed. */
-const ROOF_OPEN = 0.34;
-/** Blocked fraction at which it is fully enclosed. */
-const ROOF_SEALED = 0.84;
 
 const lerp = (a, b, t) => a + (b - a) * t;
 

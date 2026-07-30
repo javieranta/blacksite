@@ -76,6 +76,15 @@ const RELOAD_KEYS = [
   [2.16, 'charge'], [2.45, 'fore'],
 ];
 
+/**
+ * Distance from the bottom of the sole to the ankle bone, in the bind pose. The
+ * ankle sits at y = 0.040 and the pelvis solve adds a further 0.055 of hip
+ * clearance, so a leg whose hip is `h` above its own ankle puts the sole exactly
+ * `hipY - h - ANKLE_CLEAR` off the floor. Naming it stops the two magic numbers
+ * drifting apart the next time the pelvis maths is touched.
+ */
+const ANKLE_CLEAR = 0.095;
+
 export class SoldierAnim {
   /**
    * @param bones  array of THREE.Bone in BONES order
@@ -88,6 +97,41 @@ export class SoldierAnim {
     this.time = rng() * 10;
     this.idleSeed = rng() * 6.28;
 
+    /**
+     * Per-man posture constants — the thing that stops nine riflemen being nine
+     * copies of one rifleman.
+     *
+     * The previous build already varied `phase`, `time` and `idleSeed`, which is
+     * enough to desynchronise a *walk*. It is not enough for a squad that is
+     * standing and shooting, because in that state every term that shapes the
+     * pose (the fighting-stance splay, the knee break, the carry angle, the head
+     * track) was a hard-coded constant identical for everyone — so the moment
+     * they stopped moving they snapped into the same silhouette. The staged
+     * capture showed three men at 4 m with the same arm angle, the same body
+     * pitch and the same foot spacing to the pixel.
+     *
+     * These are drawn once from the agent's deterministic rng, so the squad is
+     * varied but a freeze-frame is still reproducible between rounds. Ranges are
+     * deliberately modest: this is the difference between individuals, not
+     * between styles.
+     */
+    const P = {
+      width: 0.80 + rng() * 0.50,        // stance width
+      drop: 0.75 + rng() * 0.55,         // how deep he sits into the stance
+      blade: 0.78 + rng() * 0.50,        // fore/aft foot stagger
+      weight: rng() * 2 - 1,             // standing weight bias, left/right
+      carry: rng() * 2 - 1,              // muzzle carry height at low ready
+      cant: rng() * 2 - 1,               // weapon cant
+      head: rng() * 2 - 1,               // head yaw bias off the aim line
+      lean: rng() * 2 - 1,               // torso side lean
+      slouch: rng() * 2 - 1,             // torso pitch
+      shoulder: rng() * 2 - 1,           // shoulder height asymmetry
+      breath: 0.78 + rng() * 0.46,       // breathing rate
+      scan: 0.55 + rng() * 0.85,         // idle head scan amplitude
+      toe: 0.70 + rng() * 0.65,          // how far the trailing foot turns out
+    };
+    this.persona = P;
+
     /** Written by the Combatant every tick. */
     this.in = {
       speed: 0,               // m/s of planar travel
@@ -99,7 +143,23 @@ export class SoldierAnim {
       firing: 0,              // 0..1 recoil impulse envelope
       reloadT: -1,            // >=0 while reloading
       dead: false,
+      /**
+       * World Y of the ground actually under each boot, or NaN if unknown.
+       * Written by the Combatant from a short downward cast; see _footPlant.
+       */
+      groundR: NaN,
+      groundL: NaN,
     };
+
+    /**
+     * Published world position of each boot's contact patch, for whoever needs
+     * to sample the ground under it (the Combatant's foot cast, the contact
+     * shadow). Updated at the end of every solve; reused, never reallocated.
+     */
+    this.footWorld = [new THREE.Vector3(), new THREE.Vector3()];
+    /** Damped ground offsets, relative to the body origin. */
+    this._gR = 0;
+    this._gL = 0;
 
     this.smooth = { crouch: 0, aim: 0, speed: 0, recoil: 0, lean: 0 };
     /**
@@ -210,9 +270,13 @@ export class SoldierAnim {
     const R = this._leg(this._legs[0], p0, amp, kneeStance, kneeSwing, duty);
     const L = this._leg(this._legs[1], p1, amp, kneeStance, kneeSwing, duty);
 
-    // Idle: shift weight from leg to leg and settle onto one hip.
-    const idleT = this.time * 0.42 + this.idleSeed;
-    const shift = Math.sin(idleT) * (1 - moving);
+    const P = this.persona;
+
+    // Idle: shift weight from leg to leg and settle onto one hip. The persona
+    // bias means a man at rest has a *preferred* hip rather than oscillating
+    // symmetrically about the centre, which is what people actually do.
+    const idleT = this.time * 0.42 * P.breath + this.idleSeed;
+    const shift = clamp(Math.sin(idleT) * 0.72 + P.weight * 0.55, -1.2, 1.2) * (1 - moving);
     const crouchThigh = 1.15 * c, crouchKnee = -2.10 * c;
     // Standing still, `phase` is frozen at whatever the agent's rng seeded it
     // to — so roughly half the squad sat in the swing half of the cycle with a
@@ -232,7 +296,7 @@ export class SoldierAnim {
       leg.thigh += crouchThigh + (1 - moving) * (0.035 + shift * sg * 0.045);
       leg.knee += crouchKnee - (1 - moving) * (0.09 + shift * sg * 0.075);
       // sg = +1 is the right (firing-side) leg: it trails. The left leads.
-      leg.thigh += fight * (sg > 0 ? -0.17 : 0.24);
+      leg.thigh += fight * (sg > 0 ? -0.17 : 0.24) * P.blade;
       leg.knee -= fight * (sg > 0 ? 0.09 : 0.15);
       if (standing) { leg.planted = true; leg.push = 0; }
       this._solveAnkle(leg);
@@ -246,47 +310,123 @@ export class SoldierAnim {
     if (support === 0) support = Math.max(R.hipAbove, L.hipAbove);   // flight phase
 
     /**
-     * Ground both feet.
+     * Sink into the stance — the fix for the locked-knee mannequin.
      *
-     * The pelvis sits at the reach of the most extended supporting leg, so any
-     * other planted leg that is more flexed than that cannot reach the floor —
-     * its boot simply hangs in the air. Previously nothing corrected for it, and
-     * the bladed stance above (which deliberately bends the legs by different
-     * amounts) would have left the trailing boot ~2 cm off the deck.
+     * `support` is the reach of the most *extended* planted leg, and the solve
+     * below then forces every other planted leg to reach exactly that height. So
+     * whichever leg was straightest dictated the hip, and all the deliberate
+     * knee flexion added above was immediately undone: measured at the pose the
+     * close-up captured, both knees came out at under 4 degrees. The legs
+     * rendered as two smooth pipes with no joint anywhere on them, which is the
+     * single loudest "this is not a person" cue in the whole frame.
      *
-     * The fix is exact rather than a fudge. Hip height above the ankle is
-     *   h(thigh, knee) = T*cos(thigh) + C*cos(thigh + knee)
-     * so for a required h the knee follows by one inverse cosine:
-     *   knee = -acos( (h - T*cos(thigh)) / C ) - thigh
-     * taking the flexed branch. Each planted leg straightens or bends to meet
-     * the hip the others chose, and every boot ends up on the floor.
+     * A standing man carries his hips a few centimetres below full extension; a
+     * rifleman in a fighting stance carries them a good deal lower than that,
+     * because a broken knee is what lets him drive into recoil. Dropping the hip
+     * by a deliberate amount and letting the inverse-cosine solve find the knee
+     * angle gives ~19 deg at rest and ~34 deg fully squared up, with the
+     * per-man `drop` spreading the squad either side of that.
+     *
+     * Cheap to verify: knee = acos((sink-corrected h - T*cos(thigh)) / C), so a
+     * 30 mm sink on T=0.445 C=0.425 is 20 deg and 80 mm is 36 deg.
      */
-    for (const leg of this._legs) {
+    const sink = (0.028 + 0.055 * fight * P.drop) * (1 - c * 0.55);
+    // The floor is a sanity rail, not a stance dial: a fully crouched man's hip
+    // sits at ~0.43 above his ankle, so anything at or above that would silently
+    // cancel the crouch.
+    support = Math.max(0.26, support - sink);
+
+    /**
+     * Ground both feet, on ground that is not necessarily flat.
+     *
+     * The pelvis sits at the reach of the supporting leg, so any other planted
+     * leg that is more flexed than that cannot reach the floor — its boot simply
+     * hangs in the air. Worse, until now the floor was assumed to be a single
+     * plane through the body's origin, so a man straddling a step, a kerb or one
+     * of the deck plates had one boot buried and one floating.
+     *
+     * `groundR` / `groundL` are real downward casts under each boot (see
+     * Combatant._footPlant). Both are turned into offsets from the body origin,
+     * the pelvis rides whichever foot is HIGHER, and each planted leg then
+     * solves for the hip height above *its own* ground:
+     *   h(thigh, knee) = T*cos(thigh) + C*cos(thigh + knee)
+     *   knee = -acos( (h - T*cos(thigh)) / C ) - thigh          (flexed branch)
+     * The leg on the low side extends, the leg on the high side folds, and both
+     * soles finish on the surface they are actually standing on.
+     */
+    const baseY = group.position.y;
+    const gR = I.groundR, gL = I.groundL;
+    const tR = Number.isFinite(gR) ? clamp(gR - baseY, -0.45, 0.45) : 0;
+    const tL = Number.isFinite(gL) ? clamp(gL - baseY, -0.45, 0.45) : 0;
+    // Damped so a cast that steps from one surface to the next does not pop.
+    this._gR = damp(this._gR, tR, 9, dt);
+    this._gL = damp(this._gL, tL, 9, dt);
+    const dR = this._gR, dL = this._gL;
+    const dHi = dR > dL ? dR : dL;
+
+    /**
+     * The splay is applied at the thigh's Z, which rotates the whole leg chain
+     * about the hip — so a leg that reaches `h` in the sagittal plane only
+     * reaches `h * cos(splay)` vertically. At the widest fighting stance that is
+     * 13 mm of float per boot, which is small but systematic and always in the
+     * same direction. Solving against `need / cos(splay)` removes it exactly and
+     * costs two cosines.
+     */
+    const splayR = (0.055 + 0.16 * c + 0.115 * fight) * P.width;
+    const splayL = -(0.055 + 0.16 * c + 0.070 * fight) * P.width;
+
+    /**
+     * Where the pelvis can actually go.
+     *
+     * Riding the higher foot alone is not enough, and the first cut of this got
+     * it wrong in a way the render showed immediately: with the hip near full
+     * extension there is only ~35 mm of spare leg, so the moment one boot landed
+     * on anything taller than a kerb the other could not reach its own ground —
+     * the inverse cosine went out of range, the knee kept whatever value it had,
+     * and the trailing boot hung in mid air. Which is the exact defect this code
+     * exists to remove.
+     *
+     * A person straddling a step does not lift the low foot; he drops his hips
+     * until the low leg reaches. So the pelvis takes the LOWER of "what the high
+     * foot wants" and "the furthest the low leg can stretch", with a floor so a
+     * pathological step cannot fold the high leg past its limit. Both legs are
+     * then always inside their solvable range, and neither boot can float.
+     */
+    const dLo = dR < dL ? dR : dL;
+    const reach = (RIG.thigh + RIG.calf) * 0.985;
+    let hipRel = Math.min(support + dHi, dLo + reach);
+    hipRel = Math.max(hipRel, dHi + 0.30);
+    const hipY = ANKLE_CLEAR + hipRel;
+    for (const [leg, d, sp] of [[R, dR, splayR], [L, dL, splayL]]) {
       if (!leg.planted) continue;
-      const v = (support - RIG.thigh * Math.cos(leg.thigh)) / RIG.calf;
-      if (v > -1 && v < 1) {
-        leg.knee = clamp(-Math.acos(v) - leg.thigh, -2.45, -0.015);
-        this._solveAnkle(leg);
-      }
+      const need = (hipRel - d) / Math.cos(sp);              // hip above THIS ankle
+      const v = (need - RIG.thigh * Math.cos(leg.thigh)) / RIG.calf;
+      // Saturate rather than skip. Leaving the knee at a stale value when the
+      // solve is out of range is what put a boot in the air; a leg that is
+      // simply straight (or fully folded) is always a defensible pose.
+      leg.knee = v >= 1 ? -0.015
+        : v <= -1 ? -2.45
+          : clamp(-Math.acos(v) - leg.thigh, -2.45, -0.015);
+      this._solveAnkle(leg);
     }
 
     rot[B.thighR * 3] = R.thigh; rot[B.calfR * 3] = R.knee; rot[B.footR * 3] = R.ankle;
     rot[B.thighL * 3] = L.thigh; rot[B.calfL * 3] = L.knee; rot[B.footL * 3] = L.ankle;
     // Legs splay and the knees track outward — a soldier's stance is never
-    // knock-kneed, and it widens as he settles into the fight.
-    rot[B.thighR * 3 + 2] = 0.055 + 0.16 * c + 0.085 * fight;
-    rot[B.thighL * 3 + 2] = -0.055 - 0.16 * c - 0.045 * fight;
+    // knock-kneed, and it widens as he settles into the fight. Per-man width so
+    // no two men in a section stand on the same footprint.
+    rot[B.thighR * 3 + 2] = splayR;
+    rot[B.thighL * 3 + 2] = splayL;
     // Toes follow the stance rather than the hips: lead foot square to the
     // threat, trailing foot turned out.
-    rot[B.thighR * 3 + 1] = 0.20 * fight;
-    rot[B.thighL * 3 + 1] = -0.07 * fight;
+    rot[B.thighR * 3 + 1] = 0.20 * fight * P.toe;
+    rot[B.thighL * 3 + 1] = -0.07 * fight * P.toe;
     // _solveAnkle levels the sole fore-and-aft; the splay above rolls it
     // sideways, so cancel that at the ankle too or the boots stand on their
     // inside edges. Yaw needs no correction — turning a foot does not tilt it.
     rot[B.footR * 3 + 2] = -rot[B.thighR * 3 + 2];
     rot[B.footL * 3 + 2] = -rot[B.thighL * 3 + 2];
 
-    const hipY = 0.040 + support + 0.055;
     const pelvis = bones[B.pelvis];
     pelvis.position.y = damp(pelvis.position.y, hipY, 26, dt);
 
@@ -320,22 +460,29 @@ export class SoldierAnim {
     dYaw = clamp(dYaw, -1.15, 1.15);
     const pitch = clamp(Math.asin(clamp(aimDir.y, -1, 1)), -0.7, 0.6);
 
-    const breath = Math.sin(this.time * 1.55 + this.idleSeed) * (1 - moving * 0.6);
+    const breath = Math.sin(this.time * 1.55 * P.breath + this.idleSeed) * (1 - moving * 0.6);
     const twist = dYaw * lerp(0.32, 0.62, S.aim);
     rot[B.spine * 3 + 1] = twist * 0.42;
     rot[B.chest * 3 + 1] = twist * 0.58;
-    rot[B.spine * 3] = -0.05 + breath * 0.016 + lerp(0.0, 0.10, runBlend) * moving;
-    rot[B.chest * 3] = -0.06 - pitch * 0.22 * S.aim + breath * 0.022 + lerp(0, 0.12, runBlend) * moving;
-    rot[B.chest * 3 + 2] = -Math.sin(p0 * Math.PI * 2) * 0.05 * moving;
-    rot[B.spine * 3 + 2] = Math.sin(p0 * Math.PI * 2) * 0.03 * moving;
+    // Persona pitch/lean: one man stands square and upright, the next carries a
+    // rolled shoulder and a slight forward crouch. Applied to the trunk rather
+    // than the head so it survives the aim solve.
+    rot[B.spine * 3] = -0.05 + P.slouch * 0.030 + breath * 0.016 + lerp(0.0, 0.10, runBlend) * moving;
+    rot[B.chest * 3] = -0.06 + P.slouch * 0.026 - pitch * 0.22 * S.aim + breath * 0.022
+      + lerp(0, 0.12, runBlend) * moving;
+    rot[B.chest * 3 + 2] = -Math.sin(p0 * Math.PI * 2) * 0.05 * moving + P.lean * 0.042 * (1 - moving);
+    rot[B.spine * 3 + 2] = Math.sin(p0 * Math.PI * 2) * 0.03 * moving + P.lean * 0.026 * (1 - moving);
 
-    // Head tracks the target independently of the torso, with a lazy scan when idle.
-    const scan = (1 - S.aim) * Math.sin(this.time * 0.31 + this.idleSeed * 2) * 0.34;
-    const headYaw = clamp(dYaw - twist, -1.1, 1.1) * lerp(0.55, 1.0, S.aim) + scan;
+    // Head tracks the target independently of the torso, with a lazy scan when
+    // idle. The persona bias is a small permanent offset off the aim line —
+    // people do not point their heads exactly where their rifle points.
+    const scan = (1 - S.aim) * Math.sin(this.time * 0.31 * P.breath + this.idleSeed * 2) * 0.34 * P.scan;
+    const headYaw = clamp(dYaw - twist, -1.1, 1.1) * lerp(0.55, 1.0, S.aim)
+      + scan + P.head * 0.10 * (1 - S.aim * 0.55);
     rot[B.neck * 3 + 1] = headYaw * 0.35;
     rot[B.head * 3 + 1] = headYaw * 0.65;
-    rot[B.neck * 3] = -pitch * 0.25 - 0.04 + 0.10 * c;
-    rot[B.head * 3] = -pitch * 0.45 * lerp(0.4, 1, S.aim) + 0.06;
+    rot[B.neck * 3] = -pitch * 0.25 - 0.04 + 0.10 * c - P.slouch * 0.030;
+    rot[B.head * 3] = -pitch * 0.45 * lerp(0.4, 1, S.aim) + 0.06 - P.slouch * 0.022;
 
     /* ---- flinch ---------------------------------------------------------- */
     for (let i = this.flinch.length - 1; i >= 0; i--) {
@@ -364,13 +511,33 @@ export class SoldierAnim {
       if (i === B.clavL || i === B.armL || i === B.foreL || i === B.handL) continue;
       bones[i].rotation.set(rot[i * 3], rot[i * 3 + 1], rot[i * 3 + 2]);
     }
-    bones[B.clavR].rotation.set(0, 0, 0);
-    bones[B.clavL].rotation.set(0, 0, 0);
+    /**
+     * Clavicles carry the per-man shoulder asymmetry. They sit above the arm
+     * bones in the hierarchy but outside the IK chain — `_twoBone` reads the
+     * upper arm's parent world quaternion — so rotating them simply moves the
+     * shoulder sockets and the IK re-solves onto the same rifle. A firing
+     * shoulder rolled up and forward into the stock, and a support shoulder that
+     * differs from man to man, is most of what distinguishes two people holding
+     * the same weapon.
+     */
+    const shr = P.shoulder * 0.055;
+    bones[B.clavR].rotation.set(-0.05 * S.aim + shr * 0.6, 0, -0.09 * S.aim - shr);
+    bones[B.clavL].rotation.set(-0.03 * S.aim - shr * 0.4, 0, 0.05 * S.aim - shr * 0.7);
     group.rotation.y = I.bodyYaw;
     group.updateMatrixWorld(true);
 
     /* ---- weapon placement + arm IK --------------------------------------- */
     this._placeWeapon(dt, reloading);
+
+    /**
+     * Publish each boot's contact patch so the Combatant can cast for the ground
+     * under it next tick, and the contact shadow can be parked on it. The offset
+     * is the sole's centre in the foot bone's frame, not the ankle joint.
+     */
+    _v4.set(0, -0.036, -0.064).applyMatrix4(bones[B.footR].matrixWorld);
+    this.footWorld[0].copy(_v4);
+    _v4.set(0, -0.036, -0.064).applyMatrix4(bones[B.footL].matrixWorld);
+    this.footWorld[1].copy(_v4);
   }
 
   /**
@@ -393,14 +560,18 @@ export class SoldierAnim {
     chest.getWorldPosition(_v1);
 
     const aim = S.aim;
+    const P = this.persona;
     const sprint = clamp((S.speed - 3.4) / 2.0, 0, 1) * (1 - aim);
 
     // Butt-of-stock anchor, in chest space: shoulder pocket when aiming, dropped
-    // to the ribs at low ready, tucked across the body at a sprint.
+    // to the ribs at low ready, tucked across the body at a sprint. The persona
+    // nudges where in the pocket the butt sits and how high the weapon is
+    // carried — a 2 cm spread, which is enough that two men side by side do not
+    // hold the rifle at the same height.
     _v2.set(
-      lerp(0.142, 0.086, aim) - sprint * 0.02,
-      lerp(-0.070, 0.128, aim) - sprint * 0.10,
-      lerp(0.055, 0.040, aim) + sprint * 0.02,
+      lerp(0.142, 0.086, aim) - sprint * 0.02 + P.shoulder * 0.014,
+      lerp(-0.070, 0.128, aim) - sprint * 0.10 + P.carry * 0.017,
+      lerp(0.055, 0.040, aim) + sprint * 0.02 + P.carry * 0.008,
     );
     _v2.z += S.recoil * 0.035;                  // recoil into the shoulder
     _v2.applyQuaternion(qc).add(_v1);           // -> world butt position
@@ -411,8 +582,8 @@ export class SoldierAnim {
       _bz.set(0, 0, -1).applyQuaternion(qc);
       _by.set(0, 1, 0);
       _bx.crossVectors(_by, _bz).normalize();
-      const down = lerp(0.56, 0.98, sprint);
-      const inb = lerp(0.16, 0.60, sprint);
+      const down = lerp(0.56, 0.98, sprint) + P.carry * 0.10;
+      const inb = lerp(0.16, 0.60, sprint) + P.cant * 0.05;
       _v4.copy(_bz).multiplyScalar(Math.cos(down))
         .addScaledVector(_by, -Math.sin(down))
         .addScaledVector(_bx, -inb)
@@ -429,7 +600,7 @@ export class SoldierAnim {
     _by.crossVectors(_bz, _bx).normalize();
     _mb.makeBasis(_bx, _by, _bz);
     qr.setFromRotationMatrix(_mb);
-    _q1.setFromAxisAngle(_bz, lerp(-0.15, -0.05, aim));
+    _q1.setFromAxisAngle(_bz, lerp(-0.15, -0.05, aim) + P.cant * 0.055);
     qr.premultiply(_q1);
 
     /* ---- reload timeline: cant the gun in, work the mag well -------------- */

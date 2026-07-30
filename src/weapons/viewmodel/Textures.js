@@ -532,10 +532,20 @@ function gloveFabric(size = 512) {
       const rowV = Math.abs(((v * 3) % 1) - 0.5) * 2;
       const bead = 0.5 + 0.5 * Math.sin(u * 48 * Math.PI);
       const stitch = Math.pow(Math.max(0, 1 - rowV / 0.07), 2) * (0.45 + 0.55 * bead);
-      const base = 0.0135 + 0.0060 * dirt;
-      o.r = base * (0.94 + 0.26 * weave) + stitch * 0.012;
-      o.g = base * (0.90 + 0.26 * weave) + stitch * 0.011;
-      o.b = base * (0.84 + 0.26 * weave) + stitch * 0.010;
+      /**
+       * VALUE, NOT JUST TEXTURE. This was 0.0135-0.0195 linear — sRGB 36, which
+       * is *darker* than the weapon's polymer lower (0.025-0.039, sRGB 48) and
+       * darker than its phosphate steel. A hand darker than the gun it is holding
+       * cannot be seen holding it: for four rounds the only hand geometry that
+       * reached the screen was read as part of the weapon, or as scenery. A dark
+       * coyote glove is sRGB 78 or so, which is 0.075 linear — 2.6x the polymer.
+       * That gap is what makes a finger legible against a receiver flank, and it
+       * is the difference between hands and another dark bracket.
+       */
+      const base = 0.0520 + 0.0200 * dirt;
+      o.r = base * (1.00 + 0.26 * weave) + stitch * 0.026;
+      o.g = base * (0.92 + 0.26 * weave) + stitch * 0.023;
+      o.b = base * (0.74 + 0.26 * weave) + stitch * 0.018;
       o.rough = 0.92 - 0.08 * weave + 0.05 * (fibre - 0.5) - 0.07 * stitch;
       o.metal = 0.0;
       o.ao = 1 - 0.22 * (1 - weave);
@@ -552,7 +562,11 @@ function rubber(size = 256) {
       const cell = vn(u, v, C(40), 3);
       const fine = vn(u, v, C(60), 71);
       const dust = fbm(u, v, 3, 29, C, 3);
-      const base = 0.0095 + 0.0045 * dust;
+      // Deliberately left near-black while the glove was lifted to 0.075: the
+      // knuckle armour, the palm reinforcement and the finger pads are all this
+      // zone, and a 4:1 value step between pad and glove is what separates four
+      // knuckles into four knuckles instead of one dark mass.
+      const base = 0.0140 + 0.0060 * dust;
       o.r = base * (0.94 + 0.16 * cell);
       o.g = base * (0.95 + 0.16 * cell);
       o.b = base * (0.99 + 0.16 * cell);
@@ -576,10 +590,21 @@ function ripstop(size = 256) {
       const gv = Math.pow(Math.max(0, 1 - Math.abs(((v * 7) % 1) - 0.5) * 2 / 0.10), 2);
       const grid = Math.max(gu, gv);
       const dirt = fbm(u, v, 3, 199, C, 4);
-      const base = 0.0155 + 0.0080 * dirt;
-      o.r = base * (0.92 + 0.20 * weave) * 1.02;
-      o.g = base * (0.94 + 0.20 * weave) * 1.05;
-      o.b = base * (0.88 + 0.20 * weave) * 0.86;
+      // Lifted with the glove, and a step lighter again: the support forearm is
+      // the largest single piece of the hand rig on screen (~450 px crossing the
+      // frame to the bottom-left corner) and it has to separate from the
+      // receiver flank it crosses in front of. Faded olive-drab ripstop.
+      // Held level with the glove rather than a step above it. A sleeve lighter
+      // than the glove made the forearm the brightest object in the lower half of
+      // the frame, which is how a 450 px tube ends up reading as scenery instead
+      // of as the darker thing at the end of the lighter thing that holds a gun.
+      // Coyote, not olive. A green sleeve is the odd note in a scene lit by a low
+      // sun through dust: everything else in frame is warm, so the one cool
+      // object reads as not belonging to the weapon or the shooter.
+      const base = 0.0520 + 0.0205 * dirt;
+      o.r = base * (0.98 + 0.20 * weave) * 1.10;
+      o.g = base * (0.94 + 0.20 * weave) * 0.93;
+      o.b = base * (0.86 + 0.20 * weave) * 0.60;
       o.rough = 0.93 - 0.06 * weave - 0.05 * grid;
       o.metal = 0.0;
       o.ao = 1 - 0.18 * (1 - weave);

@@ -101,6 +101,51 @@ export const HITBOXES = [
   ['calfL',   B.calfL,  0, -0.210, 0,    0.075, 0.225, 0.075, 0.75],
 ];
 
+/* ------------------------------------------------------------- kit tints --- */
+
+/**
+ * Per-part albedo multipliers, baked into a vertex colour attribute.
+ *
+ * Four material families is the right number of draw calls, but it is the wrong
+ * number of *values*: helmet, plate carrier, pouches, knee pads, gloves and
+ * boots all landed on one `gear` texture, so the entire load-bearing kit painted
+ * at a single lightness and the man read as a torso-shaped lump with a gun. In
+ * silhouette that is the difference between "soldier" and "mannequin", and no
+ * amount of normal-map detail rescues it — separation in a silhouette is a
+ * *value* problem.
+ *
+ * A vertex colour costs three bytes a vertex and zero draw calls, and three
+ * multiplies the albedo by it before anything else touches the surface, so this
+ * is a free per-part value ladder on top of the shared textures. Values are
+ * linear multipliers on an albedo that already sits at 0.08-0.19, so even the
+ * brightest entry stays well inside a plausible dielectric range.
+ *
+ * The ladder, lightest to darkest: helmet shell -> webbing/yokes -> gloves ->
+ * smock -> trousers -> pouches -> plate carrier -> pads -> boots. That puts a
+ * light mass at the top of the figure, a dark band across the chest and dark
+ * feet, which is the value structure a real photograph of a rifleman has.
+ */
+export const KIT = {
+  smock:    [1.10, 1.09, 1.06],
+  trouser:  [0.86, 0.87, 0.88],
+  helmet:   [1.62, 1.60, 1.46],
+  earcup:   [0.86, 0.88, 0.92],
+  webbing:  [1.34, 1.28, 1.10],
+  yoke:     [1.24, 1.20, 1.06],
+  carrier:  [0.66, 0.70, 0.72],
+  pouch:    [1.16, 1.02, 0.80],
+  pad:      [0.62, 0.64, 0.68],
+  glove:    [1.42, 1.36, 1.22],
+  boot:     [0.54, 0.55, 0.58],
+  belt:     [0.92, 0.90, 0.84],
+  skin:     [1.00, 1.00, 1.00],
+  gunSteel: [1.00, 1.00, 1.00],
+  gunPoly:  [0.72, 0.73, 0.76],
+  gunFurn:  [0.88, 0.86, 0.80],
+  optic:    [1.00, 1.00, 1.00],
+  lens:     [1.00, 1.00, 1.00],
+};
+
 /* -------------------------------------------------------------- geo utils --- */
 
 const _m = new THREE.Matrix4();
@@ -188,7 +233,7 @@ class Skinner {
   constructor() {
     this.groups = new Map();
     for (const f of MATERIAL_ORDER) {
-      this.groups.set(f, { pos: [], nrm: [], uv: [], si: [], sw: [], idx: [], verts: 0, tris: 0 });
+      this.groups.set(f, { pos: [], nrm: [], uv: [], col: [], si: [], sw: [], idx: [], verts: 0, tris: 0 });
     }
   }
 
@@ -196,7 +241,7 @@ class Skinner {
    * @param family  material family key
    * @param g       geometry already placed in character space
    * @param bone    primary bone index
-   * @param o       { uv:number, uo:[u,v], blend:{bone, y0, y1} }
+   * @param o       { uv:number, uo:[u,v], blend:{bone, y0, y1}, tint:[r,g,b] }
    */
   add(family, g, bone, o = {}) {
     const G = this.groups.get(family);
@@ -205,6 +250,7 @@ class Skinner {
     const uvs = o.uv ?? 4.0;
     const uo = o.uo ?? [0, 0];
     const bl = o.blend;
+    const tint = o.tint ?? KIT.skin;
     const base = G.verts;
 
     for (let i = 0; i < pos.count; i++) {
@@ -212,6 +258,7 @@ class Skinner {
       G.pos.push(x, y, z);
       G.nrm.push(nrm.getX(i), nrm.getY(i), nrm.getZ(i));
       G.uv.push(uv.getX(i) * uvs + uo[0], uv.getY(i) * uvs + uo[1]);
+      G.col.push(tint[0], tint[1], tint[2]);
       let t = 0;
       if (bl) t = Math.min(1, Math.max(0, (y - bl.y0) / (bl.y1 - bl.y0)));
       G.si.push(bone, bl ? bl.bone : 0, 0, 0);
@@ -238,6 +285,7 @@ class Skinner {
       g.setAttribute('position', new THREE.Float32BufferAttribute(G.pos, 3));
       g.setAttribute('normal', new THREE.Float32BufferAttribute(G.nrm, 3));
       g.setAttribute('uv', new THREE.Float32BufferAttribute(G.uv, 2));
+      g.setAttribute('color', new THREE.Float32BufferAttribute(G.col, 3));
       g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(G.si, 4));
       g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(G.sw, 4));
       g.setIndex(G.idx);
@@ -259,14 +307,17 @@ function buildTorso(s) {
   const yHip = BIND[B.pelvis].y, ySpine = BIND[B.spine].y, yChest = BIND[B.chest].y;
   // Trunk: three overlapping ovoids, weights blended vertically so the spine
   // actually bends instead of shearing at the seams.
-  s.add('fatigue', taperY(blob(0.150, 0, yHip - 0.015, 0, 1.16, 0.72, 0.86, 14), 0.92, 1.0), B.pelvis, { uv: 1.8 });
+  s.add('fatigue', taperY(blob(0.150, 0, yHip - 0.015, 0, 1.16, 0.72, 0.86, 14), 0.92, 1.0), B.pelvis,
+    { uv: 1.8, tint: KIT.trouser });
   s.add('fatigue', taperY(blob(0.152, 0, ySpine, 0, 1.10, 0.80, 0.82, 14), 0.98, 1.02), B.spine,
-    { uv: 1.8, blend: { bone: B.chest, y0: ySpine, y1: yChest } });
+    { uv: 1.8, tint: KIT.smock, blend: { bone: B.chest, y0: ySpine, y1: yChest } });
   s.add('fatigue', taperY(blob(0.176, 0, yChest + 0.01, 0, 1.14, 0.86, 0.80, 16), 0.92, 0.96), B.chest,
-    { uv: 1.8, blend: { bone: B.spine, y0: yChest, y1: ySpine } });
+    { uv: 1.8, tint: KIT.smock, blend: { bone: B.spine, y0: yChest, y1: ySpine } });
   // collar of the smock
-  s.add('fatigue', tube(0.086, 0.078, 0.075, 0, BIND[B.neck].y - 0.02, 0, 'y', 14), B.chest, { uv: 2 });
-  s.add('gear', taperY(blob(0.055, 0, BIND[B.neck].y + 0.035, 0, 1, 1.2, 1, 10), 1, 1), B.neck, { uv: 2 });
+  s.add('fatigue', tube(0.086, 0.078, 0.075, 0, BIND[B.neck].y - 0.02, 0, 'y', 14), B.chest,
+    { uv: 2, tint: KIT.smock });
+  s.add('gear', taperY(blob(0.055, 0, BIND[B.neck].y + 0.035, 0, 1, 1.2, 1, 10), 1, 1), B.neck,
+    { uv: 2, tint: KIT.earcup });
 }
 
 function buildCarrier(s) {
@@ -283,28 +334,40 @@ function buildCarrier(s) {
    * carrier floated 4.2 cm clear of the torso — visible daylight under the
    * armour from any three-quarter angle.
    */
-  s.add('gear', curveX(box(0.300, 0.360, 0.036, 0, y + 0.010, -0.130, 0, 0, 0, 6), 2.5), B.chest, { uv: 2.2 });
-  s.add('gear', curveX(box(0.300, 0.350, 0.034, 0, y + 0.015, 0.132, 0, 0, 0, 6), -2.5), B.chest, { uv: 2.2, uo: [0.3, 0.6] });
-  s.add('gear', tube(0.204, 0.196, 0.135, 0, BIND[B.spine].y - 0.015, 0, 'y', 18), B.spine, { uv: 2.4 });
+  s.add('gear', curveX(box(0.300, 0.360, 0.040, 0, y + 0.010, -0.134, 0, 0, 0, 6), 2.5), B.chest,
+    { uv: 2.2, tint: KIT.carrier });
+  s.add('gear', curveX(box(0.300, 0.350, 0.038, 0, y + 0.015, 0.136, 0, 0, 0, 6), -2.5), B.chest,
+    { uv: 2.2, uo: [0.3, 0.6], tint: KIT.carrier });
+  s.add('gear', tube(0.204, 0.196, 0.135, 0, BIND[B.spine].y - 0.015, 0, 'y', 18), B.spine,
+    { uv: 2.4, tint: KIT.carrier });
   // shoulder yokes
   for (const sg of [1, -1]) {
     const bone = sg > 0 ? B.armR : B.armL;
-    s.add('gear', blob(0.088, sg * 0.196, BIND[B.armR].y + 0.012, 0, 1.0, 0.78, 1.06, 12), bone, { uv: 2 });
-    s.add('gear', curveX(box(0.088, 0.150, 0.028, sg * 0.115, y + 0.150, -0.075, 0, 0, sg * 0.30, 3), 0.4, sg * 0.115), B.chest, { uv: 2 });
+    s.add('gear', blob(0.088, sg * 0.196, BIND[B.armR].y + 0.012, 0, 1.0, 0.78, 1.06, 12), bone,
+      { uv: 2, tint: KIT.yoke });
+    s.add('gear', curveX(box(0.092, 0.150, 0.032, sg * 0.115, y + 0.150, -0.078, 0, 0, sg * 0.30, 3), 0.4, sg * 0.115), B.chest,
+      { uv: 2, tint: KIT.webbing });
   }
   // triple rifle-mag pouch, admin pouch, radio, dump pouch
   for (let i = -1; i <= 1; i++) {
-    s.add('gear', box(0.078, 0.148, 0.062, i * 0.084, BIND[B.spine].y - 0.005, -0.158, 0.06, 0, 0, 2),
-      B.spine, { uv: 2.6, uo: [i * 0.2, 0] });
-    s.add('gear', box(0.070, 0.020, 0.052, i * 0.084, BIND[B.spine].y + 0.072, -0.162, 0.06, 0, 0, 1), B.spine, { uv: 2 });
+    s.add('gear', box(0.078, 0.148, 0.070, i * 0.084, BIND[B.spine].y - 0.005, -0.166, 0.06, 0, 0, 2),
+      B.spine, { uv: 2.6, uo: [i * 0.2, 0], tint: KIT.pouch });
+    s.add('gear', box(0.070, 0.020, 0.058, i * 0.084, BIND[B.spine].y + 0.072, -0.172, 0.06, 0, 0, 1),
+      B.spine, { uv: 2, tint: KIT.webbing });
   }
-  s.add('gear', box(0.104, 0.126, 0.070, 0.196, BIND[B.spine].y + 0.020, 0.010, 0, 0, -0.10, 2), B.spine, { uv: 2.4 });
-  s.add('gear', box(0.118, 0.156, 0.062, -0.075, y + 0.020, 0.150, 0, 0, 0.06, 2), B.chest, { uv: 2.4 });
-  s.add('steel', tube(0.008, 0.008, 0.115, -0.075, y + 0.150, 0.150, 'y', 6), B.chest, { uv: 1 });   // antenna
+  s.add('gear', box(0.104, 0.126, 0.070, 0.196, BIND[B.spine].y + 0.020, 0.010, 0, 0, -0.10, 2), B.spine,
+    { uv: 2.4, tint: KIT.pouch });
+  s.add('gear', box(0.118, 0.156, 0.062, -0.075, y + 0.020, 0.150, 0, 0, 0.06, 2), B.chest,
+    { uv: 2.4, tint: KIT.pouch });
+  s.add('steel', tube(0.008, 0.008, 0.115, -0.075, y + 0.150, 0.150, 'y', 6), B.chest,
+    { uv: 1, tint: KIT.gunSteel });   // antenna
   // belt + drop-leg holster
-  s.add('gear', tube(0.166, 0.160, 0.062, 0, BIND[B.pelvis].y - 0.030, 0, 'y', 18), B.pelvis, { uv: 2.4 });
-  s.add('gear', box(0.078, 0.170, 0.062, 0.150, 0.800, 0.015, 0, 0, -0.06, 2), B.thighR, { uv: 2.4 });
-  s.add('steel', box(0.028, 0.070, 0.034, 0.150, 0.880, 0.030, -0.10, 0, -0.06), B.thighR, { uv: 1 });
+  s.add('gear', tube(0.166, 0.160, 0.062, 0, BIND[B.pelvis].y - 0.030, 0, 'y', 18), B.pelvis,
+    { uv: 2.4, tint: KIT.belt });
+  s.add('gear', box(0.078, 0.170, 0.062, 0.150, 0.800, 0.015, 0, 0, -0.06, 2), B.thighR,
+    { uv: 2.4, tint: KIT.pouch });
+  s.add('steel', box(0.028, 0.070, 0.034, 0.150, 0.880, 0.030, -0.10, 0, -0.06), B.thighR,
+    { uv: 1, tint: KIT.gunSteel });
 }
 
 function buildArms(s) {
@@ -313,19 +376,35 @@ function buildArms(s) {
     const aUp = sg > 0 ? B.armR : B.armL;
     const aFo = sg > 0 ? B.foreR : B.foreL;
     const yS = BIND[B.armR].y, yE = yS - RIG.upperArm, yW = yE - RIG.foreArm;
-    s.add('fatigue', limb(x, yS, 0, x, yE, 0, 0.066, 0.053, 10), aUp, { uv: 2, uo: [sg * 0.3, 0] });
-    s.add('fatigue', limb(x, yE, 0, x, yW, 0, 0.055, 0.041, 10), aFo, { uv: 2, uo: [0, sg * 0.4] });
+    s.add('fatigue', limb(x, yS, 0, x, yE, 0, 0.066, 0.053, 10), aUp,
+      { uv: 2, uo: [sg * 0.3, 0], tint: KIT.smock });
+    s.add('fatigue', limb(x, yE, 0, x, yW, 0, 0.055, 0.041, 10), aFo,
+      { uv: 2, uo: [0, sg * 0.4], tint: KIT.smock });
+    // Elbow pad. Same job as the knee pad: a hard dark mass on the outside of a
+    // joint is what tells the eye there IS a joint there, and without one an
+    // upper arm and a forearm at 15 deg read as one bent sausage.
+    s.add('gear', blob(0.052, x, yE + 0.004, -0.044, 1.0, 1.16, 0.72, 10), aFo,
+      { uv: 2, tint: KIT.pad });
     // rolled cuff, on the forearm so it stays put when the wrist breaks over
-    s.add('gear', tube(0.046, 0.044, 0.048, x, yW + 0.020, 0, 'y', 10), aFo, { uv: 2 });
+    s.add('gear', tube(0.048, 0.046, 0.050, x, yW + 0.020, 0, 'y', 10), aFo,
+      { uv: 2, tint: KIT.webbing });
   }
   buildFiringHand(s);
   buildSupportHand(s);
 }
 
-/** One finger: two capsule segments so it curls instead of poking straight out. */
-function finger(s, bone, ax, ay, az, mx, my, mz, bx, by, bz, r = 0.0095) {
-  s.add('gear', limb(ax, ay, az, mx, my, mz, r, r * 0.94, 6), bone, { uv: 3.0 });
-  s.add('gear', limb(mx, my, mz, bx, by, bz, r * 0.94, r * 0.82, 6), bone, { uv: 3.0 });
+/**
+ * One finger: two capsule segments so it curls instead of poking straight out,
+ * plus a knuckle sphere at the proximal joint.
+ *
+ * The knuckle is not decoration. At 4 m a bare capsule pair is two smooth tubes
+ * and the hand reads as a mitten; the row of knuckles is the single feature that
+ * says "fingers wrapped round something". It costs 42 triangles a finger.
+ */
+function finger(s, bone, ax, ay, az, mx, my, mz, bx, by, bz, r = 0.0108) {
+  s.add('gear', limb(ax, ay, az, mx, my, mz, r, r * 0.94, 6), bone, { uv: 3.0, tint: KIT.glove });
+  s.add('gear', limb(mx, my, mz, bx, by, bz, r * 0.94, r * 0.82, 6), bone, { uv: 3.0, tint: KIT.glove });
+  s.add('gear', blob(r * 1.28, ax, ay, az, 1, 1, 1, 6), bone, { uv: 3.0, tint: KIT.glove });
 }
 
 /**
@@ -350,15 +429,18 @@ function buildFiringHand(s) {
   const back = gz + 0.078;
 
   // Palm heel wrapping the outboard face of the grip.
-  s.add('gear', taperY(blob(0.044, gx + 0.023, gy - 0.022, gz + 0.050, 0.62, 1.30, 1.05, 10), 0.92, 1.0,
-    gx + 0.023, gz + 0.050), H, { uv: 2.2 });
+  s.add('gear', taperY(blob(0.046, gx + 0.024, gy - 0.022, gz + 0.050, 0.64, 1.30, 1.05, 10), 0.92, 1.0,
+    gx + 0.024, gz + 0.050), H, { uv: 2.2, tint: KIT.glove });
   // Web of the thumb, filling the corner behind the backstrap.
-  s.add('gear', blob(0.030, gx + 0.014, gy + 0.004, back + 0.004, 1.05, 0.90, 0.95, 10), H, { uv: 2.2 });
-  // Knuckle armour on the back of the hand.
-  s.add('gear', box(0.020, 0.072, 0.058, gx + 0.036, gy - 0.014, gz + 0.044, 0.10, 0, 0.12, 2), H, { uv: 2.6 });
+  s.add('gear', blob(0.031, gx + 0.014, gy + 0.004, back + 0.004, 1.05, 0.90, 0.95, 10), H,
+    { uv: 2.2, tint: KIT.glove });
+  // Knuckle armour on the back of the hand — the one hard, dark element on an
+  // otherwise pale glove, so the hand still has an internal edge.
+  s.add('gear', box(0.021, 0.074, 0.060, gx + 0.037, gy - 0.014, gz + 0.044, 0.10, 0, 0.12, 2), H,
+    { uv: 2.6, tint: KIT.pad });
 
   // Three fingers curled round the frontstrap, plus the index on the trigger.
-  const rows = [[-0.026, 0.0100], [-0.050, 0.0098], [-0.072, 0.0088]];
+  const rows = [[-0.026, 0.0112], [-0.050, 0.0110], [-0.072, 0.0098]];
   for (const [dy, r] of rows) {
     finger(s, H,
       gx + 0.026, gy + dy + 0.004, gz + 0.044,     // knuckle, on the grip's side
@@ -371,13 +453,13 @@ function buildFiringHand(s) {
     gx + 0.026, gy - 0.002, gz + 0.040,
     gx + 0.016, gy - 0.004, gz + 0.006,
     gx + 0.002, gy + 0.002, gz - 0.014,
-    0.0102);
+    0.0114);
   // Thumb, laid over the top of the backstrap toward the safety.
   finger(s, H,
     gx + 0.024, gy + 0.014, back,
     gx + 0.006, gy + 0.020, back - 0.018,
     gx - 0.014, gy + 0.018, back - 0.040,
-    0.0118);
+    0.0130);
 }
 
 /**
@@ -398,12 +480,14 @@ function buildSupportHand(s) {
   // spans x ±0.015, y ±0.041, z ±0.018. The fist closes around it in XZ.
   const fz = oz - 0.028;          // finger centreline, forward of the post
 
-  s.add('gear', taperY(blob(0.043, ox - 0.020, oy + 0.002, oz + 0.004, 0.70, 1.16, 1.02, 10), 0.94, 1.0,
-    ox - 0.020, oz + 0.004), H, { uv: 2.2 });
-  s.add('gear', blob(0.028, ox - 0.012, oy + 0.030, oz + 0.012, 1.0, 0.88, 0.95, 10), H, { uv: 2.2 });
-  s.add('gear', box(0.019, 0.070, 0.052, ox - 0.034, oy - 0.004, oz - 0.004, 0.08, 0, -0.10, 2), H, { uv: 2.6 });
+  s.add('gear', taperY(blob(0.045, ox - 0.021, oy + 0.002, oz + 0.004, 0.72, 1.16, 1.02, 10), 0.94, 1.0,
+    ox - 0.021, oz + 0.004), H, { uv: 2.2, tint: KIT.glove });
+  s.add('gear', blob(0.029, ox - 0.012, oy + 0.030, oz + 0.012, 1.0, 0.88, 0.95, 10), H,
+    { uv: 2.2, tint: KIT.glove });
+  s.add('gear', box(0.020, 0.072, 0.054, ox - 0.035, oy - 0.004, oz - 0.004, 0.08, 0, -0.10, 2), H,
+    { uv: 2.6, tint: KIT.pad });
 
-  const rows = [[0.016, 0.0100], [-0.006, 0.0098], [-0.028, 0.0090], [-0.048, 0.0080]];
+  const rows = [[0.016, 0.0112], [-0.006, 0.0110], [-0.028, 0.0102], [-0.048, 0.0092]];
   for (const [dy, r] of rows) {
     finger(s, H,
       ox - 0.024, oy + dy, oz - 0.010,
@@ -417,7 +501,7 @@ function buildSupportHand(s) {
     ox - 0.018, oy + 0.028, oz - 0.006,
     ox - 0.004, oy + 0.034, oz - 0.030,
     ox + 0.012, oy + 0.032, oz - 0.054,
-    0.0118);
+    0.0130);
 }
 
 function buildLegs(s) {
@@ -443,17 +527,42 @@ function buildLegs(s) {
      * segments with the gastrocnemius bulge between them, and a seat mass fills
      * the hip so the trunk no longer sits on the legs like a wedge on sticks.
      */
-    s.add('fatigue', taperY(blob(0.108, x, yH - 0.045, 0.010, 1.05, 0.80, 1.0, 12), 1.0, 0.9, x, 0.010), th, { uv: 2 }); // seat / hip mass
-    s.add('fatigue', limb(x, yH + 0.02, 0, x, yK + 0.010, 0, 0.116, 0.093, 12), th, { uv: 2, uo: [sg * 0.2, 0.5] });
+    s.add('fatigue', taperY(blob(0.108, x, yH - 0.045, 0.010, 1.05, 0.80, 1.0, 12), 1.0, 0.9, x, 0.010), th,
+      { uv: 2, tint: KIT.trouser }); // seat / hip mass
+    /**
+     * The thigh now stops SHORT of the knee (yK + 0.055 rather than yK + 0.010).
+     * A thigh capsule that runs all the way into the shank capsule welds the two
+     * into one continuous tube and the joint disappears — which is exactly what
+     * the close-up showed: a pair of smooth bowed pipes with no knee anywhere on
+     * them, whatever angle the IK actually put the leg at. Leaving a 4-5 cm gap
+     * and filling it with a narrower knee sleeve gives the silhouette a real
+     * waist at the joint, so a bent leg reads as bent.
+     */
+    s.add('fatigue', limb(x, yH + 0.02, 0, x, yK + 0.055, 0, 0.116, 0.086, 12), th,
+      { uv: 2, uo: [sg * 0.2, 0.5], tint: KIT.trouser });
+    // knee sleeve: narrow, spans the joint, skinned to the shank so it follows
+    s.add('fatigue', limb(x, yK + 0.062, 0, x, yK - 0.042, -0.004, 0.074, 0.080, 12), ca,
+      { uv: 2, uo: [sg * 0.2, 0.5], tint: KIT.trouser });
     const yB = yK - RIG.calf * 0.34;                       // calf belly
-    s.add('fatigue', limb(x, yK, 0, x, yB, -0.006, 0.088, 0.098, 12), ca, { uv: 2, uo: [0, sg * 0.3] });
-    s.add('fatigue', limb(x, yB, -0.006, x, yA + 0.055, 0, 0.098, 0.062, 12), ca, { uv: 2, uo: [0, sg * 0.3] });
+    s.add('fatigue', limb(x, yK - 0.030, -0.004, x, yB, -0.008, 0.084, 0.100, 12), ca,
+      { uv: 2, uo: [0, sg * 0.3], tint: KIT.trouser });
+    s.add('fatigue', limb(x, yB, -0.008, x, yA + 0.055, 0, 0.100, 0.062, 12), ca,
+      { uv: 2, uo: [0, sg * 0.3], tint: KIT.trouser });
     // cargo pocket on the thigh, knee pad, boot
-    s.add('fatigue', curveX(box(0.090, 0.130, 0.030, sg * 0.150, yH - 0.150, -0.040, 0, sg * 0.22, 0, 3), 0.6, sg * 0.150), th, { uv: 2 });
-    // Knee pad, not a knee ball: taller than it is wide, and strapped to the
-    // FRONT of the joint rather than swallowing it.
-    s.add('gear', blob(0.066, x, yK + 0.008, -0.062, 0.94, 1.34, 0.58, 12), ca, { uv: 2 });
-    s.add('gear', taperY(blob(0.062, x, yA + 0.075, 0, 1.05, 1.15, 1.0, 12), 1.0, 0.92, x, 0), ca, { uv: 2.2 });   // boot cuff
+    s.add('fatigue', curveX(box(0.104, 0.148, 0.038, sg * 0.152, yH - 0.150, -0.044, 0, sg * 0.22, 0, 3), 0.6, sg * 0.152), th,
+      { uv: 2, tint: KIT.pouch });
+    /**
+     * Knee pad. Was 12 mm proud of a 88 mm shank — inside the silhouette, so it
+     * contributed nothing. Now a hard cap standing 40 mm off the front of the
+     * joint, in the darkest value on the figure, which is what turns a leg into
+     * a leg-with-a-knee from across the yard.
+     */
+    s.add('gear', blob(0.074, x, yK + 0.006, -0.080, 1.02, 1.48, 0.74, 12), ca,
+      { uv: 2, tint: KIT.pad });
+    s.add('gear', box(0.128, 0.020, 0.030, x, yK - 0.052, -0.044, 0.35, 0, 0, 2), ca,
+      { uv: 2, tint: KIT.webbing });   // lower retention strap
+    s.add('gear', taperY(blob(0.064, x, yA + 0.075, 0, 1.05, 1.15, 1.0, 12), 1.0, 0.92, x, 0), ca,
+      { uv: 2.2, tint: KIT.webbing });   // boot cuff
     /**
      * The ankle bone sits at yA = 0.040 and the floor is y = 0, so the sole has
      * exactly 40 mm to work with. The sole slab used to be centred at yA-0.040
@@ -465,30 +574,45 @@ function buildLegs(s) {
     // Boots were 100 x 240 mm — a size 5. A 50th-percentile male in a combat
     // boot is nearer 115 x 300, and an undersized foot is what makes a figure
     // look like it is balancing on hooves.
-    s.add('gear', taperY(box(0.114, 0.086, 0.286, x, yA + 0.018, -0.062, 0, 0, 0, 2), 1.0, 0.86, x, -0.062), fo, { uv: 2.4 });
-    s.add('gear', box(0.122, 0.032, 0.298, x, yA - 0.020, -0.064, 0, 0, 0, 2), fo, { uv: 3.2 });
-    s.add('gear', taperY(blob(0.056, x, yA + 0.006, -0.198, 1.0, 0.62, 1.0, 10), 1, 0.8, x, -0.198), fo, { uv: 2 });    // toe cap
+    s.add('gear', taperY(box(0.114, 0.086, 0.286, x, yA + 0.018, -0.062, 0, 0, 0, 2), 1.0, 0.86, x, -0.062), fo,
+      { uv: 2.4, tint: KIT.boot });
+    s.add('gear', box(0.122, 0.032, 0.298, x, yA - 0.020, -0.064, 0, 0, 0, 2), fo,
+      { uv: 3.2, tint: KIT.boot });
+    s.add('gear', taperY(blob(0.056, x, yA + 0.006, -0.198, 1.0, 0.62, 1.0, 10), 1, 0.8, x, -0.198), fo,
+      { uv: 2, tint: KIT.boot });    // toe cap
   }
 }
 
 function buildHead(s) {
   const yH = BIND[B.head].y;
   // balaclava'd skull + jaw, then the helmet shell over the top
-  s.add('gear', blob(0.116, 0, yH + 0.072, 0.004, 0.94, 1.06, 1.02, 16), B.head, { uv: 2 });
-  s.add('gear', taperY(blob(0.086, 0, yH + 0.006, -0.020, 1.0, 0.86, 1.10, 14), 0.86, 1.0, 0, -0.020), B.head, { uv: 2 });
-  s.add('gear', dome(0.134, 0, yH + 0.068, 0.006, 1.0, 0.96, 1.06, 2.02), B.head, { uv: 2.8 });
-  s.add('gear', tube(0.132, 0.136, 0.026, 0, yH + 0.006, 0.006, 'y', 20), B.head, { uv: 2.4 });      // helmet rim
+  s.add('gear', blob(0.116, 0, yH + 0.072, 0.004, 0.94, 1.06, 1.02, 16), B.head,
+    { uv: 2, tint: KIT.earcup });
+  s.add('gear', taperY(blob(0.086, 0, yH + 0.006, -0.020, 1.0, 0.86, 1.10, 14), 0.86, 1.0, 0, -0.020), B.head,
+    { uv: 2, tint: KIT.earcup });
+  s.add('gear', dome(0.134, 0, yH + 0.068, 0.006, 1.0, 0.96, 1.06, 2.02), B.head,
+    { uv: 2.8, tint: KIT.helmet });
+  s.add('gear', tube(0.132, 0.136, 0.026, 0, yH + 0.006, 0.006, 'y', 20), B.head,
+    { uv: 2.4, tint: KIT.helmet });      // helmet rim
   for (const sg of [1, -1]) {
-    s.add('gear', blob(0.052, sg * 0.126, yH + 0.012, 0.010, 0.7, 1.05, 1.15, 10), B.head, { uv: 2 }); // ear cup
-    s.add('steel', box(0.010, 0.016, 0.130, sg * 0.128, yH + 0.070, 0.010, 0, 0, 0, 2), B.head, { uv: 1 }); // rail
-    s.add('gear', box(0.014, 0.070, 0.014, sg * 0.116, yH - 0.030, -0.010, 0, 0, sg * 0.22), B.head, { uv: 2 }); // chin strap
+    s.add('gear', blob(0.052, sg * 0.126, yH + 0.012, 0.010, 0.7, 1.05, 1.15, 10), B.head,
+      { uv: 2, tint: KIT.earcup }); // ear cup
+    s.add('steel', box(0.010, 0.016, 0.130, sg * 0.128, yH + 0.070, 0.010, 0, 0, 0, 2), B.head,
+      { uv: 1, tint: KIT.gunSteel }); // rail
+    s.add('gear', box(0.014, 0.070, 0.014, sg * 0.116, yH - 0.030, -0.010, 0, 0, sg * 0.22), B.head,
+      { uv: 2, tint: KIT.webbing }); // chin strap
   }
-  s.add('steel', box(0.056, 0.052, 0.030, 0, yH + 0.118, -0.116), B.head, { uv: 1 });                 // NVG shroud
-  s.add('steel', tube(0.013, 0.013, 0.030, 0, yH + 0.118, -0.134, 'z', 8), B.head, { uv: 1 });
+  s.add('steel', box(0.056, 0.052, 0.030, 0, yH + 0.118, -0.116), B.head,
+    { uv: 1, tint: KIT.gunSteel });                 // NVG shroud
+  s.add('steel', tube(0.013, 0.013, 0.030, 0, yH + 0.118, -0.134, 'z', 8), B.head,
+    { uv: 1, tint: KIT.gunSteel });
   // smoked goggles across the brow, on a webbing band
-  s.add('visor', curveX(box(0.200, 0.062, 0.024, 0, yH + 0.062, -0.108, -0.06, 0, 0, 8), 1.5), B.head);
-  s.add('gear', curveX(box(0.216, 0.028, 0.020, 0, yH + 0.070, -0.100, -0.06, 0, 0, 6), 1.5), B.head, { uv: 2 });
-  s.add('gear', tube(0.130, 0.132, 0.028, 0, yH + 0.066, 0.014, 'y', 18), B.head, { uv: 2 });
+  s.add('visor', curveX(box(0.200, 0.062, 0.024, 0, yH + 0.062, -0.108, -0.06, 0, 0, 8), 1.5), B.head,
+    { tint: KIT.lens });
+  s.add('gear', curveX(box(0.216, 0.028, 0.020, 0, yH + 0.070, -0.100, -0.06, 0, 0, 6), 1.5), B.head,
+    { uv: 2, tint: KIT.webbing });
+  s.add('gear', tube(0.130, 0.132, 0.028, 0, yH + 0.066, 0.014, 'y', 18), B.head,
+    { uv: 2, tint: KIT.webbing });
 }
 
 /**
@@ -503,34 +627,36 @@ function buildRifle(s) {
   const bore = gy + 0.077;
   const P = (w, h, d, x, y, z, rx = 0, ry = 0, rz = 0) => box(w, h, d, gx + x, gy + y, gz + z, rx, ry, rz, 2);
   const T = (r0, r1, l, x, y, z, ax = 'z', rad = 10) => tube(r0, r1, l, gx + x, gy + y, gz + z, ax, rad);
+  const ST = { uv: 1, tint: KIT.gunSteel };
 
-  s.add('steel', P(0.062, 0.092, 0.270, 0, 0.077, -0.020), H, { uv: 1.6 });                 // upper+lower receiver
-  s.add('steel', P(0.050, 0.040, 0.120, 0, 0.020, 0.010), H, { uv: 1.2 });                  // trigger housing
-  s.add('steel', P(0.048, 0.116, 0.062, 0, -0.028, 0.052, 0.22), H, { uv: 1.6 });           // pistol grip
-  s.add('gear',  P(0.052, 0.120, 0.058, 0, -0.030, 0.052, 0.22), H, { uv: 2.2 });           // grip overmould
-  s.add('steel', taperY(P(0.048, 0.210, 0.088, 0, -0.070, -0.030, 0.10), 0.94, 1.0, gx, gz - 0.030), H, { uv: 1.6 }); // magazine
-  s.add('steel', P(0.056, 0.062, 0.300, 0, 0.078, -0.300), H, { uv: 1.6 });                 // handguard
+  s.add('steel', P(0.062, 0.092, 0.270, 0, 0.077, -0.020), H, { uv: 1.6, tint: KIT.gunSteel }); // upper+lower receiver
+  s.add('steel', P(0.050, 0.040, 0.120, 0, 0.020, 0.010), H, { uv: 1.2, tint: KIT.gunSteel });  // trigger housing
+  s.add('steel', P(0.048, 0.116, 0.062, 0, -0.028, 0.052, 0.22), H, { uv: 1.6, tint: KIT.gunSteel }); // pistol grip
+  s.add('gear',  P(0.052, 0.120, 0.058, 0, -0.030, 0.052, 0.22), H, { uv: 2.2, tint: KIT.gunPoly });  // grip overmould
+  s.add('steel', taperY(P(0.048, 0.210, 0.088, 0, -0.070, -0.030, 0.10), 0.94, 1.0, gx, gz - 0.030), H,
+    { uv: 1.6, tint: KIT.gunSteel }); // magazine
+  s.add('steel', P(0.056, 0.062, 0.300, 0, 0.078, -0.300), H, { uv: 1.6, tint: KIT.gunFurn });  // handguard
   for (let i = 0; i < 5; i++) {                                                             // handguard vents
-    s.add('steel', P(0.060, 0.010, 0.016, 0, 0.052, -0.190 - i * 0.048), H, { uv: 1 });
+    s.add('steel', P(0.060, 0.010, 0.016, 0, 0.052, -0.190 - i * 0.048), H, ST);
   }
-  s.add('steel', T(0.012, 0.011, 0.330, 0, 0.077, -0.310), H, { uv: 1 });                   // barrel
-  s.add('steel', T(0.019, 0.017, 0.062, 0, 0.077, -0.500, 'z', 12), H, { uv: 1 });          // muzzle brake
-  s.add('steel', T(0.021, 0.021, 0.014, 0, 0.077, -0.472, 'z', 12), H, { uv: 1 });
-  s.add('steel', P(0.030, 0.026, 0.070, 0, 0.126, -0.196), H, { uv: 1 });                   // gas block
-  s.add('steel', P(0.026, 0.024, 0.170, 0.030, 0.086, -0.060), H, { uv: 1 });               // charging handle side
-  s.add('steel', T(0.024, 0.024, 0.130, 0, 0.056, 0.130, 'z', 10), H, { uv: 1 });           // buffer tube
-  s.add('gear',  P(0.062, 0.110, 0.052, 0, 0.052, 0.214), H, { uv: 2.2 });                  // butt pad
-  s.add('gear',  P(0.058, 0.048, 0.120, 0, 0.104, 0.150), H, { uv: 2.2 });                  // cheek riser
-  s.add('steel', P(0.048, 0.020, 0.240, 0, 0.128, -0.060), H, { uv: 1 });                   // top rail
-  s.add('steel', T(0.026, 0.026, 0.104, 0, 0.150, -0.086, 'z', 12), H, { uv: 1 });          // optic body
-  s.add('steel', P(0.040, 0.038, 0.040, 0, 0.132, -0.086), H, { uv: 1 });                   // optic mount
-  s.add('visor', T(0.023, 0.023, 0.006, 0, 0.150, -0.140, 'z', 12), H);                     // objective lens
-  s.add('visor', T(0.021, 0.021, 0.006, 0, 0.150, -0.032, 'z', 12), H);                      // ocular lens
-  s.add('steel', P(0.030, 0.082, 0.036, 0, 0.028, -0.185), H, { uv: 1.2 });                 // vertical foregrip
-  s.add('gear',  P(0.034, 0.058, 0.040, 0, 0.012, -0.185), H, { uv: 2.2 });
-  s.add('gear',  P(0.058, 0.014, 0.058, 0, 0.046, -0.185), H, { uv: 2.2 });                 // handstop shelf
-  s.add('steel', P(0.014, 0.030, 0.014, 0, 0.116, -0.404), H, { uv: 1 });                   // folded front sight
-  s.add('steel', T(0.006, 0.006, 0.026, 0.032, 0.050, 0.100, 'x', 6), H, { uv: 1 });        // sling swivel
+  s.add('steel', T(0.012, 0.011, 0.330, 0, 0.077, -0.310), H, ST);                          // barrel
+  s.add('steel', T(0.019, 0.017, 0.062, 0, 0.077, -0.500, 'z', 12), H, ST);                 // muzzle brake
+  s.add('steel', T(0.021, 0.021, 0.014, 0, 0.077, -0.472, 'z', 12), H, ST);
+  s.add('steel', P(0.030, 0.026, 0.070, 0, 0.126, -0.196), H, ST);                          // gas block
+  s.add('steel', P(0.026, 0.024, 0.170, 0.030, 0.086, -0.060), H, ST);                      // charging handle side
+  s.add('steel', T(0.024, 0.024, 0.130, 0, 0.056, 0.130, 'z', 10), H, ST);                  // buffer tube
+  s.add('gear',  P(0.062, 0.110, 0.052, 0, 0.052, 0.214), H, { uv: 2.2, tint: KIT.gunPoly });// butt pad
+  s.add('gear',  P(0.058, 0.048, 0.120, 0, 0.104, 0.150), H, { uv: 2.2, tint: KIT.gunPoly });// cheek riser
+  s.add('steel', P(0.048, 0.020, 0.240, 0, 0.128, -0.060), H, ST);                          // top rail
+  s.add('steel', T(0.026, 0.026, 0.104, 0, 0.150, -0.086, 'z', 12), H, ST);                 // optic body
+  s.add('steel', P(0.040, 0.038, 0.040, 0, 0.132, -0.086), H, ST);                          // optic mount
+  s.add('visor', T(0.023, 0.023, 0.006, 0, 0.150, -0.140, 'z', 12), H, { tint: KIT.lens }); // objective lens
+  s.add('visor', T(0.021, 0.021, 0.006, 0, 0.150, -0.032, 'z', 12), H, { tint: KIT.lens }); // ocular lens
+  s.add('steel', P(0.030, 0.082, 0.036, 0, 0.028, -0.185), H, { uv: 1.2, tint: KIT.gunSteel }); // vertical foregrip
+  s.add('gear',  P(0.034, 0.058, 0.040, 0, 0.012, -0.185), H, { uv: 2.2, tint: KIT.gunPoly });
+  s.add('gear',  P(0.058, 0.014, 0.058, 0, 0.046, -0.185), H, { uv: 2.2, tint: KIT.gunPoly }); // handstop shelf
+  s.add('steel', P(0.014, 0.030, 0.014, 0, 0.116, -0.404), H, ST);                          // folded front sight
+  s.add('steel', T(0.006, 0.006, 0.026, 0.032, 0.050, 0.100, 'x', 6), H, ST);               // sling swivel
 }
 
 /**

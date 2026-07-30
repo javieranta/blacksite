@@ -12,6 +12,21 @@ export const AI = {
   eyeHeight: 1.62,
   radius: 0.34,               // soft body radius used for avoidance
   crouchDrop: 0.42,           // pelvis drop when crouched
+  /**
+   * Hard separation, as a multiple of `radius`.
+   *
+   * `radius` is the 0.34 m steering cylinder, and it is far too small to be the
+   * separation constraint: a man in a bladed fighting stance spans ~0.9 m across
+   * his feet and carries a 0.9 m carbine across his front, so two of them at
+   * 0.7 m centres have interpenetrating boots and one rifle passing through the
+   * other's chest. 3.0 gives 1.02 m — the men still read as a fire team working
+   * one piece of cover, without any part of one body inside another.
+   *
+   * Used by Combatant._deoverlap as a *constraint*, not a steering force.
+   */
+  separationScale: 3.0,
+  /** Seconds between foot-plant ground casts, alternating feet. */
+  footProbeInterval: 0.11,
 
   /* ------------------------------------------------------------ movement --- */
   walkSpeed: 2.05,
@@ -63,6 +78,16 @@ export const AI = {
   hitChanceNear: 0.42,        // <12m
   hitChanceFar: 0.13,         // >45m
   muzzleFlashIntensity: 7.5,
+  /**
+   * How far down the bore the flash LIGHT is placed, in metres.
+   *
+   * FlashPool is physically correct inverse-square, so a light on the muzzle —
+   * 0.55 m from the shooter's own chest — delivered ~8x more irradiance to him
+   * than to anything he was shooting at. See Combatant._shoot for the full
+   * reasoning. 1.05 m keeps the flash lighting the scene in front of the weapon
+   * while taking the shooter's own body out of the near field.
+   */
+  muzzleFlashForward: 1.05,
   engageMax: 62,
 
   /* --------------------------------------------------------------- cover --- */

@@ -129,19 +129,54 @@ export function buildSpriteAtlas(size = 1024) {
   });
 
   // ── CASING ────────────────────────────────────────────────────────────────
+  // A real 5.56x45 profile rather than a capsule: extractor rim, groove, a body
+  // with the true slight taper, a shoulder, a neck and an open mouth. The case
+  // is 44.7mm long and 9.6mm across the base — an aspect of 0.21, not the 0.4 a
+  // rounded box gives you, which is most of why brass used to read fat.
+  //
+  // Shading is a turned cylinder: sqrt(1 - x^2) across the barrel with one
+  // narrow specular line, so the billboard still reads as a machined metal
+  // object while it tumbles. Authored near-neutral — `C.brass` supplies the hue.
+  const CASE_LEN = 0.88;                 // fraction of the tile the case spans
+  const CASE_R = 0.107 * CASE_LEN;       // half-width: 4.8mm on a 44.7mm case
   A.paint(SPRITE.CASING, (u, v, o) => {
-    const x = (u - 0.5) / 0.16;
-    const y = (v - 0.5) / 0.40;
-    const rr = Math.max(Math.abs(x), Math.abs(y) * 0.96);
-    const a = smoothstep(1.0, 0.9, rr);
-    // Specular band down the side of the cylinder + a darker rim.
-    const spec = Math.exp(-Math.pow((u - 0.44) / 0.045, 2)) * 0.9;
-    const body = 0.42 + 0.34 * (1 - Math.abs(x));
-    const rim = v > 0.42 && v < 0.5 ? 0.22 : 0;
-    const lum = clamp01(body + spec - rim);
-    o[0] = Math.min(1, lum * 1.12);
-    o[1] = Math.min(1, lum * 0.92);
-    o[2] = Math.min(1, lum * 0.50);
+    const t = (v - (1 - CASE_LEN) * 0.5) / CASE_LEN;   // 0 = base, 1 = mouth
+    if (t < 0 || t > 1) return;
+    let hw;
+    if (t < 0.030) hw = CASE_R;                                            // rim
+    else if (t < 0.075) hw = CASE_R * 0.845;                               // groove
+    else if (t < 0.780) hw = CASE_R * mix(1.0, 0.952, (t - 0.075) / 0.705);
+    else if (t < 0.880) hw = CASE_R * mix(0.952, 0.665, (t - 0.780) / 0.100);
+    else hw = CASE_R * 0.665;                                              // neck
+
+    const x = (u - 0.5) / hw;
+    const ax = Math.abs(x);
+    if (ax > 1.1) return;
+    const a = smoothstep(1.04, 0.82, ax);
+    if (a <= 0) return;
+
+    // Cylindrical facing term + a key from the upper left.
+    const n = Math.sqrt(Math.max(0, 1 - Math.min(1, ax * ax)));
+    let lum = 0.20 + 0.46 * n * (0.62 + 0.38 * (0.5 - x * 0.5));
+    lum += Math.exp(-(((x + 0.44) / 0.19) ** 2)) * 0.52 * n;  // specular line
+    lum += Math.exp(-(((x - 0.72) / 0.26) ** 2)) * 0.11 * n;  // dim bounce edge
+
+    if (t < 0.030) lum *= 0.88;                              // rim face
+    else if (t < 0.075) lum *= 0.55;                         // extractor groove
+    if (t > 0.760 && t < 0.900) lum *= 1.08;                 // shoulder catches
+    if (t > 0.955) {
+      // Open mouth: the bore goes dark, the lip itself catches a hard line.
+      const k = (t - 0.955) / 0.045;
+      lum = mix(lum, 0.05, smoothstep(0.10, 0.55, k));
+      lum = mix(lum, 0.92, smoothstep(0.86, 0.97, k) * n);
+    }
+    // Faint turning marks so the flank is not a clean gradient.
+    lum *= 0.94 + 0.12 * fbm2(u * 26, v * 6.5, 2, 733);
+
+    lum = clamp01(lum);
+    o[0] = Math.min(1, lum * 1.05);
+    o[1] = Math.min(1, lum * 0.99);
+    o[2] = Math.min(1, lum * 0.88);
     o[3] = a;
   });
 

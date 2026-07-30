@@ -403,6 +403,50 @@ export function projectUV(geo, tile = 2.0) {
   return geo;
 }
 
+/**
+ * Cylindrical UV projection about a vertical axis through (cx, cz): angle -> u,
+ * world height -> v.
+ *
+ * `projectUV` picks a projection axis per vertex from the dominant normal
+ * component, which is correct for architecture but wrong for a surface of
+ * revolution: the choice flips every 45 degrees, so the texture MIRRORS eight
+ * times around a cylinder and compresses toward each flip. Vertical features —
+ * form-panel seams, staining, flutes — cannot survive that. Here the angle is
+ * unwrapped per triangle across the +/-pi seam, so the wrap is continuous the
+ * whole way round and the repeat count is an integer (no seam at the join).
+ *
+ * `radius` is the reference radius used to turn an angle into an arc length, so
+ * texel density matches the rest of the level at that radius. Requires a
+ * non-indexed geometry, which is what `Builder.geo` always hands over.
+ */
+export function projectUVCylindrical(geo, o = {}) {
+  const cx = o.cx ?? 0, cz = o.cz ?? 0;
+  const tile = o.tile ?? 2.0;
+  const rRef = Math.max(0.25, o.radius ?? 1);
+  const turns = Math.max(1, Math.round((2 * Math.PI * rRef) / tile));
+  const p = geo.attributes.position;
+  const uv = new Float32Array(p.count * 2);
+  const TAU = Math.PI * 2;
+  const a = [0, 0, 0];
+  const inv = 1 / tile;
+  for (let i = 0; i + 2 < p.count; i += 3) {
+    for (let k = 0; k < 3; k++) {
+      a[k] = Math.atan2(p.getZ(i + k) - cz, p.getX(i + k) - cx) / TAU;
+    }
+    for (let k = 1; k < 3; k++) {
+      while (a[k] - a[0] > 0.5) a[k] -= 1;
+      while (a[k] - a[0] < -0.5) a[k] += 1;
+    }
+    for (let k = 0; k < 3; k++) {
+      uv[(i + k) * 2] = a[k] * turns;
+      uv[(i + k) * 2 + 1] = p.getY(i + k) * inv;
+    }
+  }
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setAttribute('uv1', new THREE.BufferAttribute(uv.slice(), 2));
+  return geo;
+}
+
 /* ---------------------------------------------------------------- Builder --- */
 
 const _m = new THREE.Matrix4();
@@ -458,7 +502,15 @@ export class Builder {
     const g = geometry.index ? geometry.toNonIndexed() : geometry.clone();
     if (matrix) g.applyMatrix4(matrix);
     if (!g.attributes.normal) g.computeVertexNormals();
-    projectUV(g, o.tile ?? 2.0);
+    // `uvCyl: [cx, cz, refRadius]` swaps the triplanar projection for a
+    // cylindrical one. Shells of revolution need it; see projectUVCylindrical.
+    if (o.uvCyl) {
+      projectUVCylindrical(g, {
+        cx: o.uvCyl[0], cz: o.uvCyl[1], radius: o.uvCyl[2], tile: o.tile ?? 2.0,
+      });
+    } else {
+      projectUV(g, o.tile ?? 2.0);
+    }
     if (!isFinitePositions(g)) {
       const key = `${o.zone ?? 'core'}|${mat}`;
       this.rejected.set(key, (this.rejected.get(key) ?? 0) + 1);

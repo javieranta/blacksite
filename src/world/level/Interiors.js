@@ -5,6 +5,8 @@ import {
   stair, railingRun, catwalk, pipeRun, truss, coping, ladder,
 } from './Modules.js';
 import { L } from './Compound.js';
+import { dressElevation } from './Facade.js';
+import { buildHallPlant } from './HallPlant.js';
 
 /**
  * OWNER: level agent.
@@ -133,6 +135,29 @@ export function buildWestHall(b, w) {
   doorUnit(b, { x: x0, y: floor + 0.1, z: zOf(36.7), w: 1.4, h: 2.1, axis: 'z', zone, leaf: true });
   doorUnit(b, { x: x1, y: floor + 0.1, z: zOf(34.7), w: 1.4, h: 2.1, axis: 'z', zone, leaf: true, open: true });
   shutter(b, { x: x1, y: floor + 0.1, z: zOf(26.0), w: 8.0, h: 6.5, axis: 'z', zone, closed: 0.2 });
+
+  // ---- elevation dressing. The east elevation is the left-hand mass of both
+  // hero framings and the far wall of `vertical`, so it gets the density; the
+  // south elevation is the long backdrop of the service-yard framings. The
+  // conduit run is pushed to 5.4 m to stay clear of the hand-placed pipe run
+  // and ladder further down this function.
+  dressElevation(b, {
+    axis: 'z', cx: x1, cz, len: D, y0: floor, height: H, thick: 0.42, face: 1,
+    zone, seed: 6203, openings: eastOpen, density: 0.85, serviceY: floor + 5.4,
+    labels: [
+      { u: 30.6, y: floor + 4.6, text: 'HALL 2', size: 0.62 },
+      { u: 15.6, y: floor + 7.4, text: 'W-12', size: 0.45 },
+    ],
+  });
+  dressElevation(b, {
+    axis: 'x', cx, cz: z0, len: W, y0: floor, height: H, thick: 0.42, face: -1,
+    zone, seed: 6211, openings: southOpen, density: 0.9,
+    labels: [{ u: 8.2, y: floor + 5.4, text: 'H-2', size: 0.6 }],
+  });
+  dressElevation(b, {
+    axis: 'z', cx: x0, cz, len: D, y0: floor, height: H, thick: 0.45, face: -1,
+    zone, seed: 6217, openings: westOpen, density: 0.55, joints: false,
+  });
 
   // cladding band over the concrete on the north and east elevations
   cladding(b, {
@@ -405,6 +430,11 @@ export function buildWestHall(b, w) {
     }
   }
 
+  // Process plant: crane, purlins, ducts, turbine deck, vessels, control cabin.
+  // Kept in its own module because it is the half of the hall the lighting
+  // agent's shafts have to fall across, and it doubles the file otherwise.
+  buildHallPlant(b, w, HALL);
+
   w.enemySpawns.push(
     new THREE.Vector3(cx - 6, floor + 1.78, cz + 12),
     new THREE.Vector3(mez.x1 - 2, mez.y + 1.78, mez.z1 - 3),
@@ -442,11 +472,31 @@ export function buildAdminBlock(b, w) {
     for (let i = 0; i < n; i++) out.push({ u: u0 + i * step, y: yBase, w: wid, h: hgt });
     return out;
   };
-  // west elevation faces the yard: shutter at ground, window bays above
+  // West elevation faces the yard: shutter at ground, window bays above.
+  //
+  // The strip u 29..38 — which is z -8..1, i.e. the south end — used to carry no
+  // opening at any level, and it is precisely what the `silhouette-dusk` camera
+  // at (20, 1.7, 0) is pointed at from ten metres away: a 9 x 11 m rectangle of
+  // nothing, about 40% of that frame. Ground-floor bays and a third stack of
+  // windows at the south end give the frame something to read; `dressElevation`
+  // below handles what a wall carries between its openings.
+  const westGlazed = [
+    { u: 2.4, y: lv[0] + 1.35, w: 3.4, h: 1.7 },
+    { u: 7.6, y: lv[0] + 1.35, w: 3.4, h: 1.7 },
+    { u: 15.2, y: lv[0] + 1.35, w: 3.4, h: 1.7 },
+    // The south stack sits at 35.0 rather than hard against the corner: that
+    // leaves a 2 m clear column at u 32.6-34.6 for a service riser and keeps
+    // u 37.5 free for the corner downpipe, and those two verticals are what
+    // actually break the strip the silhouette camera is pointed at.
+    { u: 35.0, y: lv[0] + 1.35, w: 2.6, h: 1.7 },
+    ...bays(lv[1] + 1.0, 5, 3.0, 6.4, 3.6, 1.9),
+    { u: 35.0, y: lv[1] + 1.0, w: 2.6, h: 1.9 },
+    ...bays(lv[2] + 1.0, 5, 3.0, 6.4, 3.6, 1.9),
+    { u: 35.0, y: lv[2] + 1.0, w: 2.6, h: 1.9 },
+  ];
   const westOpen = [
     { u: 22.0, y: L.yard + 0.15, w: 7.0, h: 5.0 },
-    ...bays(lv[1] + 1.0, 5, 3.0, 6.4, 3.6, 1.9),
-    ...bays(lv[2] + 1.0, 5, 3.0, 6.4, 3.6, 1.9),
+    ...westGlazed,
     { u: 12.0, y: L.yard + 0.15, w: 1.4, h: 2.2 },
   ];
   wall(b, {
@@ -476,7 +526,7 @@ export function buildAdminBlock(b, w) {
   }
   // glazing
   const zOf = (u) => z1 - u;
-  for (const o of westOpen.slice(1, 11)) {
+  for (const o of westGlazed) {
     windowUnit(b, {
       x: x0, y: o.y + o.h / 2, z: zOf(o.u + o.w / 2), w: o.w, h: o.h, axis: 'z',
       zone, cols: 3, rows: 2, apertures: ap,
@@ -490,6 +540,38 @@ export function buildAdminBlock(b, w) {
   }
   shutter(b, { x: x0, y: L.yard + 0.15, z: zOf(25.5), w: 7.0, h: 5.0, axis: 'z', zone, closed: 0.18 });
   doorUnit(b, { x: x0, y: L.yard + 0.15, z: zOf(12.7), w: 1.4, h: 2.2, axis: 'z', zone, leaf: true, open: true });
+
+  // ---- elevation dressing. The west face carries the silhouette frame, so it
+  // gets the full density and the building's identification; the returns and the
+  // rear elevation get enough to stop them reading as blank once the eye is
+  // already looking for it.
+  const H = roof - L.yard;
+  dressElevation(b, {
+    axis: 'z', cx: x0, cz, len: D, y0: L.yard, height: H, thick: 0.4, face: -1,
+    zone, seed: 5501, openings: westOpen, density: 1.25,
+    courses: [lv[1] - 0.35, lv[2] - 0.35],
+    labels: [
+      { u: 30.4, y: lv[0] + 4.4, text: 'B-04', size: 0.72 },
+      { u: 37.0, y: lv[0] + 2.6, text: 'ADMIN', size: 0.36 },
+      { u: 19.6, y: lv[0] + 5.6, text: 'NO ENTRY', size: 0.34 },
+    ],
+  });
+  dressElevation(b, {
+    axis: 'z', cx: x1, cz, len: D, y0: L.yard, height: H, thick: 0.4, face: 1,
+    zone, seed: 5507, openings: eastOpen, density: 0.7,
+  });
+  for (const [pz, fc] of [[z0, -1], [z1, 1]]) {
+    dressElevation(b, {
+      axis: 'x', cx, cz: pz, len: W, y0: L.yard, height: H, thick: 0.4, face: fc,
+      zone, seed: 5511 + (fc > 0 ? 40 : 0), density: 0.8, joints: false,
+      openings: [
+        ...bays(lv[1] + 1.0, 2, 3.5, 8.0, 3.4, 1.9),
+        ...bays(lv[2] + 1.0, 2, 3.5, 8.0, 3.4, 1.9),
+        { u: 8.0, y: L.yard + 0.15, w: 1.4, h: 2.2 },
+      ],
+      labels: fc > 0 ? [{ u: 12.4, y: lv[2] + 0.4, text: 'BLOCK 4', size: 0.5 }] : null,
+    });
+  }
 
   // ---- projecting stair tower breaks the facade silhouette
   const tz = 18.0;

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { cyl, lathe, tube, rng } from './GeoKit.js';
+import { coolingShell } from './Towers.js';
 import { truss } from './Modules.js';
 
 /**
@@ -129,17 +130,19 @@ function pipeRack(b, x0, z0, x1, z1, h) {
   }
 }
 
-/** Hyperbolic cooling tower pair. The biggest, softest mass in the band. */
-function coolingPair(b, x, z, h, gap) {
+/**
+ * Hyperbolic cooling tower pair. The biggest, softest mass in the band — and
+ * previously the flattest: an 18-segment lathe of `concrete` at 120 m has no
+ * surface at all. `coolingShell` gives it the same construction language as the
+ * compound's own tower (lift lines, colonnade, cornice, staining) for about 3k
+ * triangles, which is what makes the two read as the same kind of object.
+ */
+function coolingPair(b, x, z, h, gap, seed) {
   for (const s of [-1, 1]) {
-    const hh = h * (s > 0 ? 1 : 0.88);
-    const prof = [];
-    for (let i = 0; i <= 13; i++) {
-      const t = i / 13;
-      const rr = hh * 0.42 - hh * 0.25 * Math.sin(Math.min(1, t * 1.16) * Math.PI * 0.5) + hh * 0.15 * t * t;
-      prof.push([rr, t * hh]);
-    }
-    b.geo('concrete', lathe(prof, 18), b.xform(x + s * gap / 2, 0, z + s * gap * 0.18, {}), OPT);
+    coolingShell(b, {
+      x: x + (s * gap) / 2, z: z + s * gap * 0.18,
+      h: h * (s > 0 ? 1 : 0.88), zone: ZONE, seed: seed + (s > 0 ? 0 : 613),
+    });
   }
 }
 
@@ -234,7 +237,7 @@ export function buildOutfield(b, w) {
   pipeRack(b, -34, 74, 78, 71, 9.0);
   tankFarm(b, 30, 92, 8821, 5);
   flareStack(b, -14, 100, 44, 1.6);
-  coolingPair(b, 62, 116, 46, 42);
+  coolingPair(b, 62, 116, 46, 42, 4801);
   gantryCrane(b, 92, 88, 62, 24, 0.42);
   conveyor(b, -52, 118, 46, 20, -0.5);
   shedRow(b, 8, 138, 62, 34, 15, 0.18, 9);
@@ -248,7 +251,7 @@ export function buildOutfield(b, w) {
   flareStack(b, 88, -8, 38, 1.4);
   gantryCrane(b, 120, 62, 54, 21, 1.5);
   shedRow(b, 104, -52, 54, 30, 13, -0.3, 8);
-  coolingPair(b, 152, 8, 38, 36);
+  coolingPair(b, 152, 8, 38, 36, 9127);
   pylonRun(b, [66, -78], [78, 148], 7, 30);
 
   /* ---- SOUTH: behind the substation, and the far half of the vertical view. */
@@ -256,7 +259,7 @@ export function buildOutfield(b, w) {
   gantryCrane(b, -34, -70, 58, 22, -0.2);
   flareStack(b, 62, -86, 36, 1.3);
   shedRow(b, -6, -122, 70, 36, 14, 0.1, 10);
-  coolingPair(b, 106, -110, 40, 38);
+  coolingPair(b, 106, -110, 40, 38, 2255);
 
   /* ---- WEST: past the hall, and the near half of the vertical view. */
   pipeRack(b, -66, -46, -62, 44, 8.5);

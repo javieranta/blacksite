@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { chamferBox, corrugated, cyl, lathe, tube, jitter, rng } from './GeoKit.js';
+import { chamferBox, corrugated, cyl, tube, jitter, rng } from './GeoKit.js';
 import {
   wall, windowUnit, doorUnit, slab, pillar, ibeam,
   stair, railingRun, catwalk, pipeRun, truss, jersey, kerb, ramp, coping,
@@ -7,6 +7,7 @@ import {
 } from './Modules.js';
 import { L, pave } from './Site.js';
 import { buildSubstation, buildPlantDeck } from './ServiceYard.js';
+import { coolingTower } from './Towers.js';
 
 /**
  * OWNER: level agent.
@@ -523,26 +524,14 @@ export function buildNorthYard(b, w) {
     width: 1.2, zone, brackets: false,
   });
 
-  // cooling tower — second landmark, sited to close the sky gap that opens
-  // between the admin block and the stack in the hero framing
-  {
-    const prof = [];
-    for (let i = 0; i <= 16; i++) {
-      const t = i / 16;
-      const rr = 10.5 - 6.4 * Math.sin(Math.min(1, t * 1.18) * Math.PI * 0.5) + 4.2 * t * t;
-      prof.push([rr, t * 29.0]);
-    }
-    b.geo('concrete', lathe(prof, 34), b.xform(37.0, 0, 46.0, {}), { zone, tile: 3.0 });
-    for (let i = 0; i < 22; i++) {
-      const a = (i / 22) * Math.PI * 2;
-      b.geo('concrete', tube([[37 + Math.cos(a) * 11.6, 0, 46 + Math.sin(a) * 11.6],
-        [37 + Math.cos(a) * 10.2, 4.2, 46 + Math.sin(a) * 10.2]], 0.28, 6, { segLen: 6 }), null,
-        { zone, tile: 1.4 });
-    }
-    b.geo('concrete', new THREE.TorusGeometry(6.5, 0.35, 6, 34),
-      b.xform(37.0, 29.0, 46.0, { rx: Math.PI / 2 }), { zone, tile: 1.4 });
-    b.box('concrete', 37.0, 0.3, 46.0, 25.0, 0.6, 25.0, { zone, bevel: 0.08, seg: 4, cast: false });
-  }
+  // Cooling tower — second landmark, sited to close the sky gap that opens
+  // between the admin block and the stack in the hero framing. It is the largest
+  // object in five of the twelve captures, so it is built properly: see
+  // Towers.js for why the old inline lathe read as untextured.
+  coolingTower(b, {
+    x: 37.0, z: 46.0, h: 29.0, rBase: 10.6, rThroat: 6.85, throatT: 0.75,
+    seg: 44, zone, seed: 7717, ductA: 2.45, ladderA: -0.55,
+  });
 
   // silo bank
   for (let i = 0; i < 3; i++) {

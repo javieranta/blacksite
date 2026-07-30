@@ -300,8 +300,12 @@ export function buildWeaponMaterials() {
     }),
     // Tactical glove.
     glove: zone(sets.glove, {
+      // Wear tint tracks the base: the glove's albedo was raised to 0.075 linear
+      // so it reads lighter than the weapon, and a 0x4a453e wear colour on top of
+      // that is a *darkening* at the seams instead of the scuffed highlight it is
+      // meant to be.
       name: 'glove', normal: 0.82, env: 0.40, ao: 1.0, roughFloor: 0.74, tilt: 0.18,
-      wearColour: 0x4a453e, wearAmount: 0.34, wearRough: 0.74, wearMetal: 0.02,
+      wearColour: 0xa39a8b, wearAmount: 0.34, wearRough: 0.74, wearMetal: 0.02,
       cavity: 0.45, grime: 0.45,
     }),
     // Knuckle pads / palm reinforcement — same rubber, tuned harder.
@@ -313,7 +317,7 @@ export function buildWeaponMaterials() {
     // Uniform sleeve.
     sleeve: zone(sets.sleeve, {
       name: 'sleeve', normal: 0.75, env: 0.35, ao: 1.0, roughFloor: 0.76, tilt: 0.18,
-      wearColour: 0x5b5a4c, wearAmount: 0.30, wearRough: 0.78, wearMetal: 0.01,
+      wearColour: 0xb0aa93, wearAmount: 0.30, wearRough: 0.78, wearMetal: 0.01,
       cavity: 0.45, grime: 0.55,
     }),
     // Fired brass. The glossiest zone on the weapon: a case is a 10 mm object in

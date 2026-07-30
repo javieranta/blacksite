@@ -240,6 +240,7 @@ function applyRim(material, { colour, strength, power, near = 7, far = 44, minSt
     uRimMin: { value: minStrength },
   };
   material.userData.rim = u;
+  material.userData.rimBase = strength;
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, u);
     shader.fragmentShader = shader.fragmentShader
@@ -264,6 +265,52 @@ function applyRim(material, { colour, strength, power, near = 7, far = 44, minSt
   // not.
   material.customProgramCacheKey = () => `soldier-rim-${material.name}`;
   return material;
+}
+
+/**
+ * Re-tune the rim for a time of day.
+ *
+ * The rim is an ABSOLUTE addition to `totalEmissiveRadiance`, so it is deaf to
+ * both the light rig and the exposure — and the night preset moves both, hard,
+ * in the same direction. Night carries a sky luminance of 0.0055 against
+ * golden's 0.09 (16x darker) *and* opens the shutter to exposure 2.05 against
+ * golden's 1.06 (2x brighter). A rim authored to be a subtle grazing edge at
+ * golden hour therefore lands roughly thirty times hotter, relative to the
+ * scene, at night — which is exactly what the night capture showed: figures
+ * outlined in bright blue-white against surfaces sitting in near-black.
+ *
+ * So the strength is scaled by the actual radiance the figure is standing in,
+ * then divided back out by the exposure the frame will be developed at. What was
+ * a fixed number of nits becomes a fixed *ratio* to the scene, which is the only
+ * definition of "a rim light" that survives a change of time of day.
+ *
+ * Called from EnemyAI on every `lighting:rig`.
+ */
+export function setRimEnvironment(materials, rig) {
+  if (!rig) return 1;
+  const lum = Math.max(1e-4, rig.skyLuminance ?? 0.09);
+  const exposure = Math.max(0.05, rig.exposure ?? 1);
+  // Reference point is the golden rig the rim was originally dialled in against.
+  const rel = Math.pow(lum / 0.09, 0.55) * (1.06 / exposure);
+  const k = Math.min(1.15, Math.max(0.06, rel));
+  for (const name of ['fatigue', 'gear', 'steel']) {
+    const m = materials[name];
+    const u = m?.userData?.rim;
+    if (u) u.uRimStrength.value = (m.userData.rimBase ?? u.uRimStrength.value) * k;
+  }
+  /**
+   * The visor carries the same absolute-emissive problem — a lit lens on a man
+   * standing in the dark — but it cannot simply be scaled to zero with the rig.
+   * Smoked polycarbonate at roughness 0.10 has almost no diffuse response, so
+   * with the emissive gone it renders as a pure black hole where the face is,
+   * and a head with a hole in it is a worse artefact than a slightly hot lens.
+   * A quarter of the term is kept as a floor, which is physically defensible as
+   * the ambient the lens picks up off the wearer's own face.
+   */
+  if (materials.visor) {
+    materials.visor.emissiveIntensity = 0.5 * (0.30 + 0.70 * Math.min(1, k * 1.4));
+  }
+  return k;
 }
 
 /* --------------------------------------------------------------- assembly --- */
@@ -292,6 +339,11 @@ export function buildSoldierMaterials() {
     const m = new THREE.MeshStandardMaterial({
       map, normalMap: nrm, aoMap: ormT, roughnessMap: ormT, metalnessMap: ormT,
       normalScale: new THREE.Vector2(1, 1),
+      // Per-part albedo multipliers live in the geometry's colour attribute —
+      // see KIT in SoldierRig.js. This is what buys a helmet, a plate carrier,
+      // pouches, pads, gloves and boots six different values out of one texture
+      // and one draw call.
+      vertexColors: true,
       ...f.extra,
     });
     m.name = `soldier:${name}`;
@@ -313,6 +365,7 @@ export function buildSoldierMaterials() {
   const visor = new THREE.MeshStandardMaterial({
     color: 0x0a0d11, roughness: 0.10, metalness: 0.34,
     emissive: 0x0a1a20, emissiveIntensity: 0.5, envMapIntensity: 2.1,
+    vertexColors: true,
   });
   visor.name = 'soldier:visor';
   visor.userData.surface = 'glass';

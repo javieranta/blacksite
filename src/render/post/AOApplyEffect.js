@@ -62,6 +62,8 @@ uniform float uIntensity;
 uniform float uPower;
 uniform float uMultiBounce;
 uniform float uProtect;
+uniform float uDirectShare;
+uniform float uOpenLevel;
 uniform float uTolerance;
 uniform vec3 uOccludedTint;
 uniform float uSkyBias;
@@ -130,6 +132,17 @@ void mainImage(const in vec4 inputColor, const in vec2 uv, const in float depth,
   float contact = clamp(ao4.g, 0.0, 1.0);
   float skyShare = clamp(ao4.b, 0.0, 1.0);
 
+  // --- normalise the estimator's unoccluded plateau to exactly 1 ----------
+  // This is the round-7 fix and it is load bearing. The horizon search returns
+  // ~0.965, not 1.0, on flat open ground (finite steps + the minimum tap
+  // distance grazing the surface itself). Left in, that bias becomes a uniform
+  // multiply over the *whole frame*, and AutoExposurePass — nine passes
+  // downstream — meters the darkened result and gives every bit of it straight
+  // back as exposure. Measured: with AO enabled, 62% of hero-overcast got
+  // BRIGHTER. Dividing the plateau out costs nothing in the crevices and makes
+  // the term purely local, which is the only form of it the meter cannot undo.
+  float visN = clamp(vis / max(uOpenLevel, 1e-3), 0.0, 1.0);
+
   vec3 p = viewFromDepthLocal(uv, depth, uInvProjection);
   vec3 n = reconstructNormal(uv, p);
   float ndl = clamp(dot(n, uSunView), 0.0, 1.0);
@@ -141,13 +154,14 @@ void mainImage(const in vec4 inputColor, const in vec2 uv, const in float depth,
     outputColor = vec4(n * 0.5 + 0.5, 1.0);
     return;
   }
+  if (uDebug > 5.5 && uDebug < 6.5) { outputColor = vec4(vec3(visN), 1.0); return; }
+  if (uDebug > 6.5) { outputColor = vec4(vec3(uDirectShare), 1.0); return; }
 
   // --- shaping + bent-normal weighting ------------------------------------
-  // The power is what makes the term readable. The raw integral spends almost
-  // all of its range in 0.85..1.0 on open geometry and only dips at genuine
-  // junctions; raising it to a power leaves the open end alone (0.97^2.2 = 0.94)
-  // and pushes the junctions down hard (0.60^2.2 = 0.33).
-  float shaped = pow(clamp(vis, 0.0, 1.0), uPower);
+  // The power shapes the normalised term: open ground is pinned at 1 by the
+  // division above, so this only redistributes contrast inside the occluded
+  // range (0.75^2 = 0.56, 0.55^2 = 0.30) instead of dimming the whole image.
+  float shaped = pow(visN, uPower);
 
   // The sky is the dominant ambient source, so a pixel whose average unoccluded
   // direction has swung *downward* has lost more irradiance than the scalar
@@ -169,12 +183,21 @@ void mainImage(const in vec4 inputColor, const in vec2 uv, const in float depth,
   aoRGB = mix(uOccludedTint, vec3(1.0), aoRGB);
 
   // --- ambient share ------------------------------------------------------
-  float directMask = ndl * contact;
+  // directMask is pure geometry: it knows the angle to the sun, not whether
+  // the sun is delivering anything. Scaling by the frame's measured direct
+  // share is what makes this correct under overcast and at night, where the
+  // key light contributes essentially nothing and *all* of the illumination is
+  // ambient — so all of it must take the occlusion. Without the scale this term
+  // stripped 70% of the AO out of the one preset that is pure sky ambient.
+  float directMask = ndl * contact * uDirectShare;
   float ambientShare = clamp(1.0 - uProtect * directMask, 0.0, 1.0);
   vec3 occlusion = mix(vec3(1.0), aoRGB, ambientShare);
 
   // --- contact shadow attenuates DIRECT light ----------------------------
-  float direct = mix(1.0, contact, clamp(ndl * 1.35, 0.0, 1.0));
+  // Gated by the same share: with no sun there is no direct light for a contact
+  // shadow to remove, and applying it anyway would darken pure ambient — which
+  // is the "AO as dirt" failure this whole split exists to avoid.
+  float direct = mix(1.0, contact, clamp(ndl * 1.35, 0.0, 1.0) * uDirectShare);
 
   // Mode 5 is the multiplier that actually reaches the image — the one number
   // worth grading, because a healthy visibility integral says nothing about
@@ -206,6 +229,8 @@ export class AOApplyEffect extends Effect {
         ['uPower', new THREE.Uniform(GTAO.power)],
         ['uMultiBounce', new THREE.Uniform(GTAO.multiBounce)],
         ['uProtect', new THREE.Uniform(GTAO.directProtect)],
+        ['uDirectShare', new THREE.Uniform(1)],
+        ['uOpenLevel', new THREE.Uniform(GTAO.openLevel)],
         ['uTolerance', new THREE.Uniform(GTAO.upsampleTolerance)],
         ['uOccludedTint', new THREE.Uniform(new THREE.Vector3(...GTAO.occludedTint))],
         ['uSkyBias', new THREE.Uniform(GTAO.skyBias)],
@@ -232,6 +257,15 @@ export class AOApplyEffect extends Effect {
 
   set sunView(v) {
     this.uniforms.get('uSunView').value.copy(v);
+  }
+
+  /**
+   * Fraction of this frame's illumination arriving as direct sun, 0..1.
+   * Derived by PostFX from the live light rig — see `PostFX._updateSun`.
+   * Drives both the ambient/direct split and the contact shadow's authority.
+   */
+  set directShare(v) {
+    this.uniforms.get('uDirectShare').value = v;
   }
 
   set debug(mode) {

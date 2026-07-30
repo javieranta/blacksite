@@ -9,6 +9,7 @@ import { buildTerrain, buildMidDistance, buildSkyline, buildRidge, terrainHeight
 import { buildOutfield } from './level/Outfield.js';
 import { buildGroundworks, groundworkMaterials } from './level/Groundworks.js';
 import { buildForeground } from './level/Foreground.js';
+import { towerMaterials } from './level/Towers.js';
 
 // three-mesh-bvh install. Meshes without a boundsTree fall back to the stock
 // raycast, so Props' geometry keeps working untouched.
@@ -99,7 +100,7 @@ export class Level {
     // the forge's procedural bakes, so they cost no extra texture upload — only
     // the material object — and they stay out of the shared library because
     // nothing but the level ever asks for them.
-    this._localMats = groundworkMaterials(forge);
+    this._localMats = { ...groundworkMaterials(forge), ...towerMaterials(forge) };
     for (const [name, mat] of Object.entries(this._localMats)) b.material(name, mat);
 
     const w = {

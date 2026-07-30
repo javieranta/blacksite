@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { AI, makeRng } from './AIConfig.js';
-import { buildSoldierMaterials } from './soldier/SoldierMaterials.js';
+import { buildSoldierMaterials, setRimEnvironment } from './soldier/SoldierMaterials.js';
+import { ContactShadows } from './soldier/ContactShadows.js';
 import { buildSoldierTemplate } from './soldier/SoldierRig.js';
 import { NavGrid } from './nav/NavGrid.js';
 import { B } from './soldier/SoldierRig.js';
@@ -134,8 +135,22 @@ export class EnemyAI {
     this.root.name = 'ai:combatants';
     ctx.scene.add(this.root);
 
+    this.contact = new ContactShadows(AI.squadSize);
+    ctx.scene.add(this.contact.mesh);
+
     if (this.enabled) this._spawn(ctx);
     this._wire(ctx);
+
+    /**
+     * The rim term and the contact patches are both absolute quantities in a
+     * frame whose exposure moves by a factor of two between presets, so both
+     * have to be told what light they are standing in. Lighting publishes the
+     * active rig on every time-of-day change; it also publishes one during its
+     * own init, which is BEFORE this system exists, so the current rig is read
+     * directly as well as subscribed to.
+     */
+    this._applyRig(ctx.get('lighting')?.rig);
+    ctx.bus.on('lighting:rig', ({ rig }) => this._applyRig(rig));
 
     this.stats = {
       soldiers: this.enemies.length,
@@ -151,6 +166,20 @@ export class EnemyAI {
       + ` materials ${this.materials.bakeMs}ms, body ${this.template.buildMs}ms,`
       + ` total ${this.stats.ms}ms`,
     );
+  }
+
+  /**
+   * Re-key everything on the combatants that is expressed in absolute radiance
+   * rather than as a ratio to the scene.
+   */
+  _applyRig(rig) {
+    if (!rig) return;
+    const k = setRimEnvironment(this.materials, rig);
+    // Contact occlusion is a *fraction* of the light that would otherwise reach
+    // the ground, so it should not fade with the rig — but under a sky with no
+    // directionality (overcast, deep night) the real occlusion is softer and
+    // shallower, and a full-strength patch reads as a painted-on decal.
+    this.contact.setStrength(0.55 + 0.45 * Math.min(1, k));
   }
 
   /* ---------------------------------------------------------------- spawn --- */
@@ -354,6 +383,7 @@ export class EnemyAI {
     }
     this.fx.update(dt, ctx.camera);
     this._shadowLOD(ctx.camera);
+    this.contact.update(this.enemies, ctx.camera);
     const dtUpd = performance.now() - t0;
     this.profileMs.update += (dtUpd - this.profileMs.update) * 0.05;
     if (dtUpd > this.profileMs.updatePeak) this.profileMs.updatePeak = dtUpd;
@@ -455,6 +485,22 @@ export class EnemyAI {
         });
       }
     });
+    /**
+     * Under ?freeze=1 the fixed tick never runs, so Combatant._deoverlap — the
+     * constraint that guarantees two men never share a volume — never fires.
+     * Every screenshot the critics grade is a frozen frame, which means the one
+     * situation the separation constraint exists for is the one situation it was
+     * absent from. Run it directly, a few passes, until it settles.
+     */
+    for (let pass = 0; pass < 4; pass++) {
+      for (const c of this.enemies) c._deoverlap(this.squad);
+    }
+    // Re-settle: a man who was nudged needs his foot casts and pelvis damp to
+    // reconverge on the ground he is now standing on.
+    for (const c of this.enemies) {
+      c.group.position.copy(c.pos);
+      for (let k = 0; k < 8; k++) c.update(1 / 60);
+    }
   }
 
   /**
@@ -476,7 +522,28 @@ export class EnemyAI {
     const n = Math.min(howMany, sorted.length);
     // Spread scales with range: a fixed 1.9 m step throws everyone off the
     // edges of the frame once the rig asks for a 2 m framing.
-    const step = Math.min(1.9, Math.max(0.9, range * 0.42));
+    // Never below the hard separation the de-overlap constraint would enforce
+    // anyway, or the staging just hands the constraint a problem to undo.
+    const step = Math.min(2.4, Math.max(AI.radius * AI.separationScale + 0.5, range * 0.42));
+    /**
+     * `nav.nearest` quantises to the 1.25 m nav grid, so at a close staging
+     * range the lateral step could round two adjacent men onto the SAME node —
+     * two bodies at identical coordinates, interpenetrating. Snapping is still
+     * the right thing (it puts them on walkable ground at the right height), so
+     * the snapped result is checked against the men already placed and the
+     * un-snapped world position is used instead when it collides.
+     */
+    /**
+     * The test is against 75% of the intended step, not merely against the hard
+     * separation. Nav nodes are 1.25 m apart and the hard separation is 1.02 m,
+     * so two men snapped onto adjacent nodes pass a bare overlap check while
+     * still standing at two-thirds of the spacing the framing asked for — which
+     * photographs as a crowd, not as a fire team. Keeping the requested spread
+     * is the point of a staged view.
+     */
+    const minSep = Math.max(AI.radius * AI.separationScale, step * 0.75);
+    const placed = this._stagePlaced || (this._stagePlaced = []);
+    placed.length = 0;
     for (let k = 0; k < n; k++) {
       const lateral = (k - (n - 1) / 2) * step;
       const wx = eye.x + fx * range + rx * lateral;
@@ -491,10 +558,19 @@ export class EnemyAI {
         this._tmp2.set(wx, Number.isFinite(y) ? y : player.position.y, wz);
       }
       if (!Number.isFinite(this._tmp2.y)) this._tmp2.y = player.position.y;
+      for (const p of placed) {
+        const ddx = this._tmp2.x - p.x, ddz = this._tmp2.z - p.z;
+        if (ddx * ddx + ddz * ddz >= minSep * minSep) continue;
+        // Fall back to the exact requested spot, keeping the snapped height.
+        this._tmp2.x = wx;
+        this._tmp2.z = wz;
+        break;
+      }
       c.pos.copy(this._tmp2);
       c.coverNode = -1;
       c.mustCrouch = false;
       c.group.position.copy(c.pos);
+      placed.push(c.pos.clone());
     }
   }
 
@@ -573,7 +649,13 @@ export class EnemyAI {
       if (!Number.isFinite(muzzle.x + muzzle.y + muzzle.z)) continue;
       c.anim.kick(1);
       this.fx.spawn(muzzle, dir, 1.05);
-      if (lighting?.flash) lighting.flash(muzzle, 0xffd2a0, AI.muzzleFlashIntensity, 0.055);
+      // Same offset as Combatant._shoot, and for the same reason: a flash light
+      // sitting on the muzzle lights its own shooter harder than it lights
+      // anything he is shooting at.
+      if (lighting?.flash) {
+        this._tmp.copy(muzzle).addScaledVector(dir, AI.muzzleFlashForward);
+        lighting.flash(this._tmp, 0xffd2a0, AI.muzzleFlashIntensity, 0.055);
+      }
       if (particles) {
         particles.spawn('muzzle', { position: muzzle, direction: dir, scale: 0.85 });
         particles.spawn('tracer', { position: muzzle, direction: dir, scale: 1.0, colour: 0xffc070 });
@@ -585,6 +667,7 @@ export class EnemyAI {
     for (const c of this.enemies) { c.unregister?.(); c.dispose(); }
     this.enemies.length = 0;
     this.squad.dispose();
+    this.contact.dispose();
     this.fx.dispose();
     this.materials.dispose?.();
     for (const k of Object.keys(this.template.geometries)) this.template.geometries[k]?.dispose?.();

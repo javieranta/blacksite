@@ -26,7 +26,7 @@ const RESPONSE = {
   concrete: {
     dust: 1.0, debris: 5, sparks: 1,
     patch: 0.34, hole: DECAL.HOLE_CONCRETE,
-    rim: DECAL.RING_PALE, rimOpacity: 0.55,
+    rim: DECAL.RING_PALE, rimOpacity: 0.34,
     audio: 'impact_concrete',
   },
   metal: {
@@ -77,6 +77,22 @@ const RESPONSE = {
   },
 };
 
+/**
+ * How many recent decal centres to remember for the overlap test. Long enough to
+ * cover a full magazine walked across one wall, short enough that the test is a
+ * few dozen float compares.
+ */
+const RECENT = 32;
+/**
+ * Reject a new decal whose centre falls within this fraction of the combined
+ * patch radius of one already stamped. Sustained fire puts thirty rounds inside
+ * a 20 cm circle, and thirty *additive* rim decals on top of each other saturate
+ * to a flat white blob that hides the hole underneath it entirely — which is
+ * exactly what a burst into concrete used to look like. Rejecting the overlap
+ * also stops thirty slots being spent on one crater.
+ */
+const DECAL_MIN_SEP = 0.24;
+
 export class Impacts {
   constructor() {
     this.name = 'impacts';
@@ -92,6 +108,12 @@ export class Impacts {
       scale: 1, colour: null, count: undefined, floorY: undefined,
     };
     this._firePayload = { origin: null, dir: null, weapon: null, seed: 0 };
+
+    // Ring buffer of recently stamped decal centres (x, y, z, patch radius).
+    // See `_tooClose`.
+    this._recent = new Float32Array(RECENT * 4);
+    this._recentN = 0;
+    this._recentHead = 0;
 
     this._rigFire = false;
     this._rigMode = '';
@@ -220,9 +242,10 @@ export class Impacts {
     // ── decals ──────────────────────────────────────────────────────────────
     // Beyond ~70m a bullet hole is sub-pixel; spend the slot on something
     // closer. Both layers share ONE projection — 25 rays per round, not 50.
-    if (dist < 70 && r.patch !== undefined) {
+    if (dist < 70 && r.patch !== undefined && !this._tooClose(point, r.patch)) {
       const jitter = 0.84 + this._rnd() * 0.34;
       if (this._project(point, normal, r.patch * jitter)) {
+        this._remember(point, r.patch * jitter);
         if (r.hole !== undefined) {
           this._write(this.mul, r.hole, r.tinted ? def.colour : 0xffffff, 42, 1);
         }
@@ -334,6 +357,32 @@ export class Impacts {
   }
 
   // ──────────────────────────────────────────────────────────────── helpers ──
+
+  /**
+   * True when `point` sits inside a decal that was stamped recently. Flat scan
+   * over a 32-entry ring — a few dozen float compares per round, no allocation.
+   */
+  _tooClose(point, size) {
+    const a = this._recent;
+    for (let i = 0; i < this._recentN; i++) {
+      const o = i * 4;
+      const dx = point.x - a[o];
+      const dy = point.y - a[o + 1];
+      const dz = point.z - a[o + 2];
+      const lim = (size + a[o + 3]) * DECAL_MIN_SEP;
+      if (dx * dx + dy * dy + dz * dz < lim * lim) return true;
+    }
+    return false;
+  }
+
+  _remember(point, size) {
+    const h = this._recentHead;
+    const o = h * 4;
+    const a = this._recent;
+    a[o] = point.x; a[o + 1] = point.y; a[o + 2] = point.z; a[o + 3] = size;
+    this._recentHead = (h + 1) % RECENT;
+    if (this._recentN < RECENT) this._recentN++;
+  }
 
   /** Snap a patch onto the world once; every layer then shares it. */
   _project(point, normal, size) {

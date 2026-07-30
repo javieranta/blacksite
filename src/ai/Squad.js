@@ -40,6 +40,15 @@ export class Squad {
   init(materials) {
     // Three pooled frags. Hidden meshes cost nothing; a live one costs one draw.
     const geo = new THREE.IcosahedronGeometry(0.055, 1);
+    /**
+     * The soldier materials now carry per-part albedo in a vertex colour (see
+     * KIT in SoldierRig.js), so ANY geometry drawn with them must supply a
+     * `color` attribute — a mesh without one gets whatever the driver leaves in
+     * the default attribute, which is black. This is the only non-soldier
+     * geometry that borrows the kit material, so it supplies a flat white.
+     */
+    const white = new Float32Array(geo.attributes.position.count * 3).fill(1);
+    geo.setAttribute('color', new THREE.BufferAttribute(white, 3));
     for (let i = 0; i < 3; i++) {
       const mesh = new THREE.Mesh(geo, materials.gear);
       mesh.castShadow = true;

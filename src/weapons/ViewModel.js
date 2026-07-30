@@ -48,17 +48,25 @@ import { cylG, Mesher } from './viewmodel/Shapes.js';
  * That inward yaw is what makes a hipfire pose look aimed rather than parked.
  *
  * SCREEN FOOTPRINT
- *   The previous hip pose parked the magwell 475 mm out, which put the buttpad
- *   only 287 mm from the eye — close enough that the stock's flank filled the
- *   lower-right quadrant as a near-featureless slab. The pose now sits 80 mm
- *   further out and 42 mm lower, and the yaw is up from 0.13 to 0.205 rad.
+ *   Solved against measured screen-space extents rather than by eye. The round-6
+ *   pose put the weapon's bounding box at x 1016..1434, y 678..1234 at 1080p —
+ *   154 px of it below the bottom edge, with the magazine, the pistol grip and
+ *   the entire firing hand outside the frame. That is what "the rifle floats
+ *   detached" actually meant: the half of the weapon a hand could be holding was
+ *   not being photographed.
+ *
+ *   This pose measures 1040..1468 x 624..1079 — the whole weapon inside the
+ *   frame with the magazine floorplate just kissing the bottom edge, the muzzle
+ *   at (1049, 652) and the buttpad at (1440, 871), which is a 29-degree diagonal
+ *   running up and left out of the lower-right corner. Only the forearms leave
+ *   the frame, which is what forearms are supposed to do.
+ *
  *   Positive yaw swings the rear of the weapon toward +X and the muzzle toward
- *   -X, so a larger yaw simultaneously walks the stock off the right edge of the
- *   frame and brings the muzzle closer to the centre — the diagonal reads
- *   stronger while occupying a good deal less of the image.
+ *   -X, so a larger yaw walks the stock right while bringing the muzzle to the
+ *   centre — it strengthens the diagonal and costs image area at the same time.
  */
-const HIP_POS = new THREE.Vector3(0.1420, -0.2140, -0.5550);
-const HIP_ROT = new THREE.Euler(0.0620, 0.2050, 0.0900, 'YXZ');
+const HIP_POS = new THREE.Vector3(0.1850, -0.1790, -0.6150);
+const HIP_ROT = new THREE.Euler(0.0450, 0.2450, 0.0900, 'YXZ');
 const ADS_ROT = new THREE.Euler(0, 0, 0, 'YXZ');
 
 /**
@@ -110,6 +118,16 @@ export class ViewModel {
     this._forced = { ads: false, firing: false };
     this._shell = [];
     this._breath = 0;
+
+    /**
+     * Live copies of the hip pose. Held on the instance rather than read from
+     * the module constants so the composition can be swept from the debug rig
+     * inside a single page load — a pose is a *screen-space* result of six
+     * coupled numbers, and converging it one edit-and-reload at a time is how
+     * it stayed cropped against two frame edges for six rounds.
+     */
+    this.hipPos = HIP_POS.clone();
+    this.hipRot = HIP_ROT.clone();
 
     // Scratch — update() must not allocate.
     this._pos = new THREE.Vector3();
@@ -206,8 +224,8 @@ export class ViewModel {
     this._shellGeo = shellGeo;
 
     // Sit at rest before the first frame so a frozen page is already posed.
-    this.root.position.copy(HIP_POS);
-    this.root.rotation.copy(HIP_ROT);
+    this.root.position.copy(this.hipPos);
+    this.root.rotation.copy(this.hipRot);
     this._applyPose(0, null, 0);
 
     ctx.bus.on('viewmodel:visible', ({ visible }) => { this.visible = visible; });
@@ -222,9 +240,22 @@ export class ViewModel {
     // Asset-review pose. Reading the query string directly keeps the shared
     // screenshot rig untouched; it is inert unless the parameter is present.
     if (typeof location !== 'undefined') {
-      const p = new URLSearchParams(location.search).get('vmpose');
+      const q = new URLSearchParams(location.search);
+      const p = q.get('vmpose');
       if (p !== null) this._inspect = p === '' ? 1.15 : parseFloat(p);
       if (Number.isNaN(this._inspect)) this._inspect = 1.15;
+      /**
+       * `?vmstate=sprint|reload|walk` forces a pose the rig cannot otherwise
+       * reach. `?ads` and `?fire` already exist; sprint and reload did not, which
+       * means the hands were only ever reviewed in the one frozen hipfire frame
+       * and "do they hold in every pose?" was answered by argument rather than by
+       * a photograph. Reload also needs a phase, so `vmphase=0..1` picks a point
+       * in the 2.15 s animation (default 0.38, where the magazine is clear of the
+       * well and the weapon is at maximum roll).
+       */
+      this._state = q.get('vmstate');
+      const ph = parseFloat(q.get('vmphase'));
+      this._phase = Number.isNaN(ph) ? 0.38 : ph;
     }
   }
 
@@ -364,12 +395,14 @@ export class ViewModel {
     }
 
     // ---- base pose: hip <-> ADS, with a sprint carry on top ----------------
-    const sprint = pst?.sprinting && ads < 0.05 ? 1 : 0;
-    this._pos.copy(HIP_POS).lerp(this._adsPos, ads);
+    const forcedSprint = this._state === 'sprint';
+    if (this._state === 'reload') this._reloadT = this._phase * RELOAD_TIME;
+    const sprint = forcedSprint || (pst?.sprinting && ads < 0.05) ? 1 : 0;
+    this._pos.copy(this.hipPos).lerp(this._adsPos, ads);
     this._rot.set(
-      THREE.MathUtils.lerp(HIP_ROT.x, ADS_ROT.x, ads),
-      THREE.MathUtils.lerp(HIP_ROT.y, ADS_ROT.y, ads),
-      THREE.MathUtils.lerp(HIP_ROT.z, ADS_ROT.z, ads),
+      THREE.MathUtils.lerp(this.hipRot.x, ADS_ROT.x, ads),
+      THREE.MathUtils.lerp(this.hipRot.y, ADS_ROT.y, ads),
+      THREE.MathUtils.lerp(this.hipRot.z, ADS_ROT.z, ads),
     );
     if (sprint) {
       this._pos.lerp(SPRINT_POS, 0.85);

@@ -21,6 +21,8 @@ const _v2 = new THREE.Vector3();
 const _v3 = new THREE.Vector3();
 const _m = new THREE.Matrix4();
 const _up = new THREE.Vector3(0, 1, 0);
+const _down = new THREE.Vector3(0, -1, 0);
+const _flash = new THREE.Vector3();
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 const lerp = (a, b, t) => a + (b - a) * t;
 
@@ -134,6 +136,11 @@ export class Combatant {
     this._animAcc = 0;
     this._corpseSettled = false;
     this._castShadow = true;
+    /** Foot-plant probe: staggered per man so the squad never casts in lockstep. */
+    this._gcd = this.rng() * AI.footProbeInterval;
+    this._footSide = 0;
+    /** Ground height under the body, published for the contact shadow. */
+    this.groundY = spawn.y;
   }
 
   /* --------------------------------------------------------------- damage -- */
@@ -614,6 +621,7 @@ export class Combatant {
     }
 
     this.speed = Math.hypot(this.vel.x, this.vel.z);
+    this._deoverlap(squad);
 
     // Stuck detection: if the brain wants to travel but nothing is happening,
     // throw the path away and let A* try from the new position.
@@ -621,6 +629,87 @@ export class Combatant {
       this.stuck += dt;
       if (this.stuck > 0.9) { this.stuck = 0; this.pathLen = 0; this.repathCd = 0; this.coverNode = -1; }
     } else this.stuck = 0;
+  }
+
+  /**
+   * Hard positional separation.
+   *
+   * The steering above adds a repulsion to the *velocity*, which is the right
+   * behaviour for two men walking past each other and completely inadequate for
+   * two men who both want to stand on the same cover node: the desired-velocity
+   * term pulls each of them onto the node with more authority than the
+   * repulsion pushes them apart, so they converge and settle inside one another.
+   * `viewmodel-ads` caught exactly that — two combatants co-located and
+   * intersecting, one body's arm passing through the other's chest.
+   *
+   * Steering cannot fix it because it is not a steering problem: two solids may
+   * not share a volume, and that is a constraint, not a preference. So it is
+   * resolved as a constraint, on position, after integration. Each man takes
+   * half the correction and his neighbour takes the other half on his own tick,
+   * so the pair converges in one frame without either needing to know it was
+   * "the one that moved".
+   */
+  _deoverlap(squad) {
+    const nav = this.nav;
+    const minSep = AI.radius * AI.separationScale;
+    const min2 = minSep * minSep;
+    for (const o of squad.members) {
+      if (o === this || o.dead) continue;
+      const dx = this.pos.x - o.pos.x, dz = this.pos.z - o.pos.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 >= min2) continue;
+      let ux, uz, d;
+      if (d2 > 1e-6) { d = Math.sqrt(d2); ux = dx / d; uz = dz / d; } else {
+        // Exactly co-located. There is no separating axis to normalise, so pick
+        // one from the pair's identities — deterministic, and opposite for the
+        // two of them, so they do not both step the same way forever.
+        const a = (this.id * 2.3999632 + (this.id > o.id ? Math.PI : 0)) % 6.2831853;
+        d = 0; ux = Math.cos(a); uz = Math.sin(a);
+      }
+      const push = (minSep - d) * 0.5;
+      const nx = this.pos.x + ux * push;
+      const nz = this.pos.z + uz * push;
+      const n = nav.nodeAt(nx, this.pos.y, nz, 1.1);
+      if (!nav.usable(n)) continue;      // never push a man into a wall
+      this.pos.x = nx;
+      this.pos.z = nz;
+      this.navNode = n;
+    }
+  }
+
+  /**
+   * Cast for the ground under one boot.
+   *
+   * The pelvis solve grounds both feet against a single plane through the body's
+   * origin, which is the nav node's height — correct on open deck and wrong
+   * everywhere interesting. A man standing at the lip of a plate, on a step or
+   * astride a kerb had one boot buried and the other hanging, and the eye reads
+   * a floating foot instantly.
+   *
+   * Alternating feet at ~9 Hz costs one short cast per man per 0.11 s, and only
+   * inside the detail band (20 m), where the animation is already solving every
+   * frame. That is three or four casts a second across a squad in view — against
+   * ~1200 for the ballistics of a single burst — and the anim damps the result,
+   * so the lower rate is invisible. Beyond the band the offsets are released to
+   * flat, which is what a thirty-pixel silhouette wants anyway.
+   */
+  _footPlant(dt, near) {
+    const a = this.anim;
+    if (!near) { a.in.groundR = NaN; a.in.groundL = NaN; return; }
+    this._gcd -= dt;
+    if (this._gcd > 0) return;
+    this._gcd += AI.footProbeInterval;
+    this._footSide ^= 1;
+    const f = a.footWorld[this._footSide];
+    // Before the first solve footWorld is still the origin; casting there would
+    // measure the ground under the middle of the map.
+    const dx = f.x - this.pos.x, dz = f.z - this.pos.z;
+    if (dx * dx + dz * dz > 1.44) return;
+    _v1.set(f.x, this.pos.y + 0.55, f.z);
+    const hit = this.level.raycast(_v1, _down, 1.35);
+    const y = hit ? hit.point.y : NaN;
+    if (this._footSide === 0) a.in.groundR = y; else a.in.groundL = y;
+    if (Number.isFinite(y)) this.groundY = y;
   }
 
   /* -------------------------------------------------------------- shooting -- */
@@ -661,7 +750,29 @@ export class Combatant {
 
     const ctx = this.ctx;
     const lighting = ctx.get('lighting');
-    if (lighting?.flash) lighting.flash(muzzle, 0xffd2a0, AI.muzzleFlashIntensity, 0.055);
+    if (lighting?.flash) {
+      /**
+       * The flash light goes DOWN THE BORE, not on the muzzle.
+       *
+       * FlashPool lights are physically correct inverse-square, and the muzzle
+       * sits about 0.55 m from the shooter's own chest — so a light parked on it
+       * delivered intensity/0.3 to his torso. At night, where the scene sits
+       * near 0.02 and the preset opens the shutter to exposure 2.05, that is an
+       * irradiance two orders of magnitude above everything around him: the
+       * night capture showed one combatant rendered as a pale tan, full-daylight
+       * figure while every surface beside him sat in deep blue. He was being lit
+       * by his own muzzle flash, and by nothing else.
+       *
+       * Pushing the source a metre down the bore is both cheaper and more
+       * correct than dimming it: the flash still throws light onto the ground,
+       * the cover and the men in front of him — which is what a muzzle flash is
+       * FOR, visually — while his own body falls from 0.3 m^2 to 2.4 m^2 of
+       * inverse-square distance, an 8x drop, and the wall of light comes off
+       * him. See AI.muzzleFlashForward.
+       */
+      _flash.copy(muzzle).addScaledVector(this.anim.muzzleDir, AI.muzzleFlashForward);
+      lighting.flash(_flash, 0xffd2a0, AI.muzzleFlashIntensity, 0.055);
+    }
     const particles = ctx.get('particles');
     if (particles) {
       particles.spawn('muzzle', { position: muzzle, direction: _v2, scale: 0.85 });
@@ -791,6 +902,7 @@ export class Combatant {
     anim.in.bodyYaw = this.yaw;
     anim.in.aimAt.copy(engaged ? this.lastSeen : this._idleLook());
 
+    this._footPlant(dt, interval === 0);
     this.group.position.copy(this.pos);
     anim.update(dt, this.group);
 
