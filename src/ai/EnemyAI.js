@@ -406,7 +406,27 @@ export class EnemyAI {
      * smear that costs the same as the one at your feet. 22/28 m with hysteresis
      * keeps the shadows that read and drops the rest.
      */
-    const near = 22 * 22, far = 28 * 28;
+    /**
+     * RAISED FROM 22/28 m, because 22 m was inside the range the critics
+     * photograph at.
+     *
+     * The old window was chosen on a draw-call argument — nine bodies across three
+     * cascades is ~85 draw calls of a 900 ceiling — and it produced exactly the
+     * defect the review reports: "a midday standing figure casts none under a hard
+     * sun that shadows every crate beside him". The crates cast because the world's
+     * props have no such cutoff; the man 25 m away did not, so he floated. A figure
+     * that does not cast when everything around it does is not an LOD saving, it is
+     * a missing shadow, and it is the single loudest "pasted on" cue there is.
+     *
+     * 34/40 m, and 34 is not a taste value — it is exactly ContactShadows' own
+     * `maxDist`. The two systems have to agree or there is a band in which a man
+     * has neither a cast shadow nor a contact patch and simply floats, which is the
+     * defect. Tried 52/62 first, which covers the whole yard; gpuprobe put the AI's
+     * share of a cinematic frame at 2.5 ms of a 10.6 ms median, and there was no
+     * reviewable figure out past 34 m to justify the rest. The hysteresis stays, so
+     * nobody flickers on the boundary.
+     */
+    const near = 34 * 34, far = 40 * 40;
     for (const c of this.enemies) {
       const d = c.bounds.center.distanceToSquared(camera.position);
       const on = c._castShadow ? d < far : d < near;
@@ -440,7 +460,26 @@ export class EnemyAI {
      * the previous rota ('peek','peek','cover','reload','peek','cover','hunt')
      * produced. Four of the seven are now exposed and firing.
      */
-    const roles = ['peek', 'peek', 'peek', 'cover', 'peek', 'reload', 'peek'];
+    /**
+     * The rota is now varied in STANCE as well as in role.
+     *
+     * 'peek','peek','peek' put the three men nearest the camera into identical
+     * state, identical stance and identical aim, and the only thing left to
+     * distinguish them was the per-man persona multipliers — which the pose
+     * harness measured as a pairwise joint RMS of 0.083 rad, i.e. the same man
+     * three times. A staged firefight has men at different heights: one up and
+     * squared, one crouched to a knee behind a low wall, one leaning out. That is
+     * a property of the staging, not of the animation, so it is fixed here.
+     */
+    /**
+     * Eleven slots, not seven, and no two adjacent men share one.
+     *
+     * The rota repeated with period seven over nine bodies, so the two nearest the
+     * camera in most framings drew the same slot as two others. Combined with the
+     * shared blade angle below, that is how "ten figures" became "two poses".
+     */
+    const roles = ['peek', 'peek-low', 'peek-kneel', 'cover', 'peek', 'reload',
+      'peek-low', 'peek', 'cover-low', 'peek-kneel', 'peek'];
     this._shooters.length = 0;
     sorted.forEach((c, i) => {
       const r = roles[i % roles.length];
@@ -450,26 +489,51 @@ export class EnemyAI {
       c.lastSeen.copy(player.eyePosition);
       c.lastSeenAge = 0;
       c.speed = 0;
-      // Face the player, bladed.
+      /**
+       * Face the player at THIS MAN'S OWN blade angle.
+       *
+       * `+ AI.bladeAngle` here was the staging half of the "all squared to camera"
+       * defect: whatever variety the animation layer had, the body it was posing
+       * had already been rotated to the same bearing as every other body in the
+       * squad. c.bladeBias is the per-man angle (see Combatant), and it is the
+       * same number the live brain uses, so a staged frame and a played frame
+       * agree.
+       */
       this._tmp.subVectors(player.position, c.pos);
-      c.yaw = Math.atan2(-this._tmp.x, -this._tmp.z) + AI.bladeAngle + this.stageYaw;
+      const bearing = Math.atan2(-this._tmp.x, -this._tmp.z);
+      c.yaw = bearing + c.bladeBias + this.stageYaw;
       c.group.rotation.y = c.yaw;
       if (this.stageYaw) {
-        // Keep aiming where the body now faces, so the pose stays coherent.
+        // Keep aiming where the body now faces, so the pose stays coherent — but
+        // offset by his own blade, not by the shared constant, or the staging
+        // hands the aim solve a different target per man for the same pose.
         c.lastSeen.set(
-          c.pos.x - Math.sin(c.yaw - AI.bladeAngle) * 18,
+          c.pos.x - Math.sin(c.yaw - c.bladeBias) * 18,
           c.pos.y + 1.55,
-          c.pos.z - Math.cos(c.yaw - AI.bladeAngle) * 18,
+          c.pos.z - Math.cos(c.yaw - c.bladeBias) * 18,
         );
       }
       if (r === 'peek') { c.state = STATE.PEEK; c.stance = 1; c.burst = 5; }
-      else if (r === 'cover') { c.state = STATE.COVER; c.stance = 0; c.mustCrouch = true; }
-      else if (r === 'reload') { c.state = STATE.RELOAD; c.reloadT = 1.15; }
+      else if (r === 'peek-low') {
+        // Up and firing, but down in his knees behind whatever he is using — the
+        // stance that makes a section read as a section rather than a rank.
+        c.state = STATE.PEEK; c.stance = 1; c.burst = 4; c.mustCrouch = true;
+      } else if (r === 'peek-kneel') {
+        // Firing from a genuine kneel: the crouch input is driven to full rather
+        // than to the 0.35 a crouched PEEK gets, which drops the hips ~0.4 m and
+        // folds both knees past 60 degrees. A different height in the frame is the
+        // cheapest and strongest pose cue a group of figures can have.
+        c.state = STATE.PEEK; c.stance = 1; c.burst = 4; c.mustCrouch = true;
+        c.stageKneel = true;
+      } else if (r === 'cover') { c.state = STATE.COVER; c.stance = 0; c.mustCrouch = true; }
+      else if (r === 'cover-low') {
+        c.state = STATE.SUPPRESSED; c.stance = 0; c.mustCrouch = true; c.suppression = 0.9;
+      } else if (r === 'reload') { c.state = STATE.RELOAD; c.reloadT = 1.15; }
       else { c.state = STATE.HUNT; c.speed = AI.walkSpeed; }
       // Converge the animation smoothers immediately so the very first captured
       // frame is already in pose rather than lerping out of the bind pose.
       for (let k = 0; k < 30; k++) c.update(1 / 60);
-      c.anim.smooth.recoil = r === 'peek' ? 0.55 : 0;
+      c.anim.smooth.recoil = r.startsWith('peek') ? 0.55 : 0;
       /**
        * Every exposed man gets his own firing cadence, phase-offset from his
        * neighbours. A single shooter meant a single flash somewhere in frame and
@@ -477,7 +541,7 @@ export class EnemyAI {
        * takes the exposure, several muzzles are lit and several are between
        * rounds, which is what a section in contact actually looks like.
        */
-      if (r === 'peek') {
+      if (r.startsWith('peek')) {
         this._shooters.push({
           c,
           period: 0.10 + (i % 3) * 0.022,

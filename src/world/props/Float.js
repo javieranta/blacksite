@@ -361,8 +361,25 @@ export class FloatSweep {
       items.push({ key, geo, matrix, flags, merged: false, b: copyBox(b) });
       return true;
     });
+    /*
+     * Decals are judged, but not here.
+     *
+     * The old line read `if (matKey === 'decal') return true; // decals lie ON
+     * the ground`, and that comment was an assumption. round 9 measured it with
+     * tools/floatcheck.mjs and found EIGHTEEN props-owned decal quads hanging in
+     * mid-air, up to 53 cm clear of anything. But by the time a decal reaches
+     * this seam its pass has already welded every quad into one buffer, so there
+     * is no per-quad identity left to reject: judging the blob would only ever
+     * ask whether MOST of two thousand quads are in contact, and most of them
+     * always are. The check therefore happens per quad, before the merge, in
+     * parts/GroundDress.js seatQuads() — called by all three decal passes.
+     */
     batcher.remapMerges?.((matKey, geo) => {
-      if (matKey === 'decal') return true;            // decals lie ON the ground
+      // Both mark batches are judged per quad before the merge, for the reason
+      // above: 'decal' by GroundDress.seatQuads, 'grime' by the same call in
+      // parts/Grime.js. Neither has per-quad identity left by the time it
+      // reaches this seam.
+      if (matKey === 'decal' || matKey === 'grime') return true;
       const b = worldBox(geo, null, box);
       if (!this._inScope(b)) return true;             // the distance band
       items.push({ key: `merge:${matKey}`, geo, matrix: null, flags: ATTACHED, merged: true, b: copyBox(b) });

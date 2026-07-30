@@ -15,10 +15,13 @@ import {
 import { ContactPass } from './props/Contact.js';
 import { FloatSweep } from './props/Float.js';
 import { LevelFloatPass } from './props/LevelFloat.js';
+import { LevelSeatPass, seatSummary } from './props/LevelSeat.js';
+import { LevelPerchPass, perchSummary } from './props/LevelPerch.js';
 import { capPlaceholderBags } from './props/parts/BagCap.js';
 import { buildBackdrop } from './props/parts/Backdrop.js';
 import { groundMarks, apronClutter, contactPatches } from './props/parts/GroundDress.js';
 import { groundIncident } from './props/parts/GroundIncident.js';
+import { surfaceStory, nearFieldGrit } from './props/parts/Grime.js';
 
 /**
  * OWNER: props agent.
@@ -232,6 +235,12 @@ export class Props {
     //       pass costs no draw calls. See parts/GroundIncident.js.
     const incident = groundIncident(api, samples);
 
+    // 9b3 — NEAR-FIELD GRIT. Runs here, with the other scatter passes, and not
+    //       with the rest of the surface-story pass in step 10c: these are real
+    //       instances and they have to be in the queue before ContactPass and
+    //       FloatSweep so the same contact guarantee covers them.
+    const nearGrit = nearFieldGrit(api, heroes);
+
     // 9c — the distance band. Independent of everything above; it only needs the
     //      probe, and it lives entirely outside the level's own footprint.
     let backdrop = null;
@@ -288,9 +297,36 @@ export class Props {
     //       transform is final. One quad each, one shared merged batch.
     const patches = contactPatches(api, this.batcher);
 
+    // 10c — THE SURFACE STORY. Everything above dresses the floor with OBJECTS
+    //       and with high-frequency marks. tools/surfacecheck.mjs measures what
+    //       is actually missing — the spread of 32-px block MEANS, which is the
+    //       statistic that says "this patch of floor is a different value from
+    //       the one next to it" and the one the eye reads as a surface having a
+    //       history. On the round-10 build it was 0.01/255 in the interior
+    //       framing with 99.3% of blocks untouched by any authored content.
+    //       This pass adds the large-scale dirt/AO multiply layer (a new
+    //       material, one draw call) plus authored incident decals in the
+    //       existing batch. It runs HERE because a pool of grime under a prop
+    //       foot has to be written under the prop's FINAL transform.
+    //       See props/parts/Grime.js.
+    const surface = surfaceStory(api, samples);
+
     // 11 — resolve to GPU buffers
     const built = this.batcher.build();
     this.instanced = this.batcher.instanced;
+
+    /*
+     * The grime layer multiplies whatever is already in the buffer, so it has to
+     * be the LAST transparent thing on the ground: dirt lies over the oil stain,
+     * not under it. Both batches are depthWrite:false, so without an explicit
+     * order three would sort them by centroid distance and the result would flip
+     * from framing to framing.
+     */
+    for (const o of this.batcher.built) {
+      if (o.name === 'prop:grime' || o.name?.startsWith('prop:grime#')) o.renderOrder = 3;
+      else if (o.name === 'prop:decal' || o.name?.startsWith('prop:decal#')) o.renderOrder = 2;
+    }
+
 
     // 12 — local lighting on the fixtures nearest the hero framings
     this._lights = this.walls.makeLights(CONFIG.maxPointLights, heroes);
@@ -298,6 +334,31 @@ export class Props {
     this._glowCold = this.mats.get('glow_cold');
     this._glowBase = this._glow.emissiveIntensity;
     this._glowColdBase = this._glowCold.emissiveIntensity;
+
+    // 12b — THE SEAT PASS, and it runs HERE for a reason.
+    //       Everything before build() sees the props half of the world as a queue
+    //       of matrices rather than scene geometry, which is why no earlier pass
+    //       could measure the world a reviewer looks at. It also has to run after
+    //       makeLights: the lighting system builds a fixture mesh for every point
+    //       light props hands it, so at step 11 the `practicals` group does not
+    //       exist yet — and the one SEVERE float tools/floatcheck.mjs had left
+    //       after the first working version of this pass was a pair of lamp heads
+    //       in that very group, 12.5 cm apart in mid-air, invisible to a sweep
+    //       that ran before they were created.
+    //       Read the header of props/LevelSeat.js for why the previous six
+    //       attempts at "floating rusted plates" could not have worked.
+    this.seat = new LevelSeatPass();
+    const seatStats = this.seat.run(ctx, heroes);
+
+    // 12c — THE PERCH PASS. Everything above asks one question: is anything within
+    //       5 cm of this? The object the round-10 reviewer circled in hero-overcast
+    //       answered yes — it is a precast slab BALANCED ACROSS TWO 4 cm RODS, 3.4 m
+    //       up, with sky on five sides. Proximity is not support, which is why seven
+    //       reseat passes reported success while the plates stayed. This pass asks
+    //       the statics question instead; see props/LevelPerch.js. Runs after the
+    //       seat pass so it judges the world that pass leaves behind.
+    this.perch = new LevelPerchPass();
+    const perchStats = this.perch.run(ctx, heroes);
 
     // 13 — let the level rebuild any acceleration structure now that props exist
     level.rebuildCollision?.();
@@ -329,7 +390,9 @@ export class Props {
       kerbDrifts: marksStats.drifts,
       openSamples: marksStats.openSamples,
       ...incident,
-      decalQuads: marksStats.quads + patches + incident.quads,
+      ...surface,
+      nearGrit,
+      decalQuads: marksStats.quads + patches + incident.quads + surface.incidentQuads,
       contactPatches: patches,
       backdrop,
       contactChecked: contactStats.checked,
@@ -353,16 +416,38 @@ export class Props {
       floatHung: floatStats.hung,
       floatWorst: +floatStats.worstFloat.toFixed(3),
       floatWorstLeft: +floatStats.worstLeft.toFixed(4),
+      decalsSeated: (marksStats.decal?.seated ?? 0) + (incident.decalsSeated ?? 0),
+      decalsAirborne: (marksStats.decal?.dropped ?? 0) + (incident.decalsAirborne ?? 0),
+      decalWorstFloat: Math.max(marksStats.decal?.worst ?? 0, incident.decalWorst ?? 0),
       worldIslands: worldFloat.clusters,
       worldSuspects: worldFloat.suspects,
       worldResting: worldFloat.resting,
       worldAttached: worldFloat.attached,
+      worldBolted: worldFloat.bolted,
+      worldStuds: worldFloat.studs,
       worldBraced: worldFloat.braced,
       worldOrphaned: worldFloat.unbraceable,
       worldOverBudget: worldFloat.overBudget,
       bagCapRuns: bagCap.runs,
       bagCapBlobs: bagCap.blobs,
       bagCapBags: bagCap.bags,
+      seatIslands: seatStats.islands,
+      seatCandidates: seatStats.candidates,
+      seatFloating: seatStats.floating,
+      seatSevere: seatStats.severe,
+      seatSeated: seatStats.seated,
+      seatStripped: seatStats.stripped,
+      seatUnfixable: seatStats.unfixable,
+      seatSunk: seatStats.sunk,
+      seatLifted: seatStats.lifted,
+      seatUnmovable: seatStats.unmovable,
+      seatWorstGap: +seatStats.worstGap.toFixed(3),
+      seatMs: seatStats.ms | 0,
+      perchPerched: perchStats.perched,
+      perchTopple: perchStats.topple,
+      perchDropped: perchStats.dropped,
+      perchStripped: perchStats.stripped,
+      perchLeft: perchStats.left,
       hessianFromForge: !!this.mats.hessianFromForge,
       ...wallStats, ...ceilStats,
       pointLights: this._lights.length,
@@ -401,14 +486,52 @@ export class Props {
       + `Worst float found ${floatStats.worstFloat.toFixed(3)}m, worst left `
       + `${floatStats.worstLeft.toFixed(4)}m.`,
     );
+    // Decals used to be exempt from every contact pass, on the assumption in the
+    // FloatSweep comment that "decals lie ON the ground". tools/floatcheck.mjs
+    // measured the assumption and found 18 of them hanging in mid-air, up to
+    // 53 cm clear. They are now judged per quad before the merge — see
+    // props/parts/GroundDress.js seatQuads — and these are its counts.
+    console.info(
+      `[props] decal contact: ${this.stats.decalsSeated} decal quads dropped onto the `
+      + `surface beneath them, ${this.stats.decalsAirborne} DELETED as airborne `
+      + '(nothing to lie on — typically overhanging a roof edge or a stair void). '
+      + `Worst float found ${this.stats.decalWorstFloat.toFixed(3)}m.`,
+    );
     // The world float audit. These numbers are the answer to "why did three
     // rounds of props-side reseat passes not remove the floating plates".
     console.info(`[props] world float audit: ${this.levelFloats.summary()}.`);
     console.info(
       `[props] placeholder sandbags: found ${bagCap.blobs} level-authored bag blob(s) in `
       + `${bagCap.runs} parapet run(s) and laid ${bagCap.bags} real bags over them `
-      + '(0 extra draw calls � existing sandbag prototypes).',
+      + '(0 extra draw calls � existing sandbag prototypes).',
     );
+    // The seat pass is the one that runs on the FINISHED world. Its numbers are
+    // the ones tools/floatcheck.mjs can be checked against.
+    console.info(`[props] seat pass: ${seatSummary(seatStats)}.`);
+    if (this.seat.report.length) {
+      console.info(`[props] seat pass — acted on: ${this.seat.report.join(' | ')}.`);
+    }
+    if (this.seat.stuck.length) {
+      console.warn(
+        '[props] seat pass — islands it could not touch (shared vertices or a '
+        + `part-instance; these are the ones a next round starts from): ${this.seat.stuck.join(' | ')}.`,
+      );
+    }
+    // The perch pass. These numbers are the answer to "why did seven rounds of
+    // reseat passes not remove the floating plates": look at how many objects it
+    // judges RESTING/FIXED that a proximity test would have cleared anyway, and
+    // then at how few are PERCHED. The defect was always a small population that
+    // every previous instrument classified as supported.
+    console.info(`[props] perch pass: ${perchSummary(perchStats)}.`);
+    if (this.perch.report.length) {
+      console.info(`[props] perch pass — acted on: ${this.perch.report.join(' | ')}.`);
+    }
+    if (this.perch.stuck.length) {
+      console.warn(
+        '[props] perch pass — objects standing in a pose nothing holds that it could '
+        + `not act on (these are where a next round starts): ${this.perch.stuck.join(' | ')}.`,
+      );
+    }
     if (this.levelFloats.report.length) {
       console.info(`[props] world float audit — braced: ${this.levelFloats.report.join(' | ')}.`);
     }
@@ -436,6 +559,20 @@ export class Props {
       + `${incident.wallWash} wall-base washes, ${incident.oilPools} oil pools, `
       + `${incident.floorCables} floor cable runs — ${incident.quads} extra decal quads, `
       + `0 extra draw calls.`,
+    );
+    // The surface-story pass. Its numbers are the ones tools/surfacecheck.mjs
+    // can be checked against — quad counts prove intent, surfacecheck proves the
+    // image changed, and only the second one has ever convinced a reviewer.
+    console.info(
+      `[props] surface story: grime layer ${surface.grimeQuads} quads in ONE draw call `
+      + `(${surface.grimeMottle} floor mottle, ${surface.grimeWallFoot} wall-base gradients, `
+      + `${surface.grimeFeet} prop-foot pools, ${surface.grimeLanes} worn lanes, `
+      + `${surface.grimeDrains} drain sinks; ${surface.grimeDropped} dropped as airborne) · `
+      + `incident decals ${surface.incidentQuads} in the existing batch `
+      + `(${surface.spalls} spalls with exposed aggregate, ${surface.chipFields} chip fields, `
+      + `${surface.hazards} worn hazard markings, ${surface.spills} dried spills, `
+      + `${surface.rustRuns} rust runs, ${surface.grimeDrains} drain covers; `
+      + `${surface.incidentDropped} dropped) · ${nearGrit} near-field grit pieces.`,
     );
     this._auditWorld(level);
   }

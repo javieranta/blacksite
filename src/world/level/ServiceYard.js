@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { chamferBox, cyl, tube, gratingPanel } from './GeoKit.js';
 import {
-  wall, doorUnit, slab, stair, railingRun, catwalk, pipeRun, coping, basePlate,
+  wall, doorUnit, slab, landing, stair, railingRun, catwalk, pipeRun, coping, basePlate,
 } from './Modules.js';
 import { L } from './Site.js';
 
@@ -194,9 +194,24 @@ export function buildPlantDeck(b, w) {
     from: new THREE.Vector3(-2.0, deck, 2.0), to: new THREE.Vector3(-7.2, deck, 2.0),
     width: 1.5, zone: 'catwalk',
   });
+  // Split at x 13.4..15.0 so the stair spur can arrive from the south. A
+  // railing run across the head of a stair is a wall; that window is the only
+  // reason this walkway is reachable from the ground at all.
   catwalk(b, {
-    from: new THREE.Vector3(9.0, deck, 2.0), to: new THREE.Vector3(30.0, deck, 2.0),
+    from: new THREE.Vector3(9.0, deck, 2.0), to: new THREE.Vector3(13.4, deck, 2.0),
     width: 1.6, zone: 'catwalk',
+  });
+  catwalk(b, {
+    from: new THREE.Vector3(13.4, deck, 2.0), to: new THREE.Vector3(15.0, deck, 2.0),
+    width: 1.6, zone: 'catwalk', rail: false,
+  });
+  catwalk(b, {
+    from: new THREE.Vector3(15.0, deck, 2.0), to: new THREE.Vector3(30.0, deck, 2.0),
+    width: 1.6, zone: 'catwalk',
+  });
+  railingRun(b, {
+    from: new THREE.Vector3(13.4, deck, 2.84), to: new THREE.Vector3(15.0, deck, 2.84),
+    zone: 'catwalk', height: 1.1,
   });
   for (const x of [13.0, 18.0, 23.0, 28.0]) {
     for (const s of [-1, 1]) {
@@ -217,22 +232,36 @@ export function buildPlantDeck(b, w) {
     b.box('metal_rusted', x, deck + 0.95, -0.85, 0.12, 1.4, 0.12, { zone: 'catwalk', bevel: 0.02 });
   }
 
-  // switchback stair from the yard up to the deck
+  // Switchback stair from the yard up to the deck.
+  //
+  // TRAVERSAL: this used to climb the other way round — flight 1 north, flight 2
+  // back south to a head at z = -5.3, with the linking catwalk then running the
+  // full length of z -5.3..1.2 directly OVER flight 2. Bar grating has its
+  // soffit 43 mm under the deck, so from the fourth tread up the player was
+  // walking head-first into the walkway they were trying to reach and the whole
+  // plant deck was cut off from the ground. Reversed, the climb ends at the
+  // north end and the link runs away from the flight, over open yard.
   stair(b, {
-    x: 11.6, y, z: -6.4, steps: 14, rise: 0.18, run: 0.3, width: 1.4,
-    dir: new THREE.Vector3(0, 0, 1), zone: 'stairs', mat: 'metal_rusted',
-    stringerMat: 'metal_painted', railSides: [1],
-  });
-  slab(b, { x: 12.9, y: y + 2.52 - 0.1, z: -1.4, w: 3.4, d: 2.0, thick: 0.2, zone: 'stairs', mat: 'metal_rusted' });
-  stair(b, {
-    x: 14.2, y: y + 2.52, z: -1.1, steps: 14, rise: 0.18, run: 0.3, width: 1.4,
+    x: 11.6, y, z: -1.6, steps: 14, rise: 0.18, run: 0.3, width: 1.4,
     dir: new THREE.Vector3(0, 0, -1), zone: 'stairs', mat: 'metal_rusted',
     stringerMat: 'metal_painted', railSides: [-1],
   });
-  catwalk(b, {
-    from: new THREE.Vector3(14.2, deck, -5.3), to: new THREE.Vector3(14.2, deck, 1.2),
-    width: 1.4, zone: 'catwalk',
+  landing(b, { x: 12.9, y: y + 2.52 - 0.1, z: -6.8, w: 3.4, d: 2.0, thick: 0.2, zone: 'stairs', mat: 'metal_rusted', fascia: 0.26 });
+  stair(b, {
+    x: 14.2, y: y + 2.52, z: -6.6, steps: 14, rise: 0.18, run: 0.3, width: 1.4,
+    dir: new THREE.Vector3(0, 0, 1), zone: 'stairs', mat: 'metal_rusted',
+    stringerMat: 'metal_painted', railSides: [1],
   });
+  catwalk(b, {
+    from: new THREE.Vector3(14.2, deck, -2.4), to: new THREE.Vector3(14.2, deck, 2.0),
+    width: 1.4, zone: 'catwalk', rail: false,
+  });
+  for (const s of [-1, 1]) {
+    railingRun(b, {
+      from: new THREE.Vector3(14.2 + s * 0.74, deck, -2.4),
+      to: new THREE.Vector3(14.2 + s * 0.74, deck, 1.0), zone: 'catwalk', height: 1.1,
+    });
+  }
   w.spawnPoints.push(new THREE.Vector3(4.0, deck + 1.78, 3.0));
   w.enemySpawns.push(new THREE.Vector3(6.5, deck + 1.78, 1.0));
 }

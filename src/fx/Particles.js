@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import { WORLD } from '../core/Constants.js';
 import { ParticleBatch } from './particles/ParticleBatch.js';
-import { buildSpriteAtlas, ATLAS_COLS, ATLAS_ROWS } from './particles/SpriteAtlas.js';
-import { Emitter, EFFECTS } from './particles/Effects.js';
+import { buildSpriteAtlas, ATLAS_COLS, ATLAS_ROWS, SPRITE } from './particles/SpriteAtlas.js';
+import { Emitter, EFFECTS, SHELL } from './particles/Effects.js';
 
 /**
  * OWNER: particles agent.
@@ -25,9 +25,11 @@ import { Emitter, EFFECTS } from './particles/Effects.js';
  * it. Without this, every smoke puff shows the hard straight line where its quad
  * intersects the ground — the single clearest tell of billboard smoke.
  *
- * Sparks, tracers, debris and casings are motion-stretched: the quad is
- * elongated along the screen-space velocity and anchored so its head sits on the
- * particle, which is what turns a dot into a streak.
+ * Sparks and tracers are motion-stretched: the quad is elongated along the
+ * screen-space velocity and anchored so its head sits on the particle, which is
+ * what turns a dot into a streak. Casings deliberately are NOT — stretching
+ * overrides the billboard roll, so a stretched case would point along its
+ * ejection path on every shot and lose the end-over-end tumble entirely.
  *
  * Emissive brightness runs far above 1.0 (a muzzle core is ~46) because PostFX
  * composites in linear HDR and tonemaps last; anything clamped to 1.0 ends up
@@ -42,14 +44,106 @@ import { Emitter, EFFECTS } from './particles/Effects.js';
 
 /**
  * Muzzle light. 5500K (a discharge is close to daylight white; the *smoke* is
- * what is orange), spiked and gone inside ~45 ms, with the cutoff pinned to 6 m
- * so it is a pool at the shooter's feet and not a second sun over the courtyard.
- * FlashPool derives its own cutoff from the peak intensity, which for a spike
- * this bright would reach 60 m — hence the explicit override on the returned
- * light. Peak is in candela: at 1.5 m that is ~19 lux against a golden-hour sun
- * of ~3.4, so it dominates locally and vanishes by the far side of the yard.
+ * what is orange). FlashPool derives its own cutoff and falloff exponent from the
+ * peak intensity, so both are overridden on the returned light. Peak is in
+ * candela; the tonemap knee compresses hard enough that 26 and 38 both land near
+ * 2.1x on the ground, so peak is set for the REACH of the falloff rather than for
+ * the value at the centre.
+ *
+ * DECAY. This was 45 ms, which measured as the light contributing in exactly half
+ * the frames of sustained fire at 720 rpm (83 ms cyclic) — so half of all
+ * screenshots caught the dark half of the cycle and showed a completely unlit
+ * world, which is what a round-8 reviewer saw and reported as "the light, if it
+ * exists, is on the viewmodel layer only". Real flash *luminance* lasts a
+ * millisecond or two; every shipped shooter holds it far longer so it survives a
+ * 60 Hz sample, and 90 ms with FlashPool's k^2 falloff still re-spikes hard on
+ * every round rather than sitting on as a steady glow — the next round arrives at
+ * 83 ms, just as this one dies. Peak trimmed to keep the integrated energy
+ * roughly where it was. Measured lit-frame share: 0.50 at 45 ms, 0.72 at 75 ms,
+ * 0.85 at 90 ms. `tools/fxcheck.mjs --flash` is the assertion.
+ *
+ * PLACEMENT AND REACH (round 10). The light was already at the world muzzle, not
+ * on the camera — `_muzzlePosition` puts it 0.93 m down the bore — but a 6 m
+ * cutoff makes the only *visible* pool the concrete at the shooter's feet, which
+ * is indistinguishable from a camera-centred glow and is what the round-9 review
+ * reported. Two changes:
+ *
+ *  · `forward` pushes the source 0.55 m past the crown. A discharge is a fireball
+ *    that extends beyond the barrel, so the brightest ground is ahead of the
+ *    shooter, not under him. It also stops the near falloff being dominated by
+ *    the player's own feet.
+ *  · `radius` 6 -> 30 m with `falloff` 1.0 instead of a physical 2. Inverse square
+ *    cannot light 1.6 m and 20 m in the same frame: at true 1/r^2 a wall at 20 m
+ *    gets (1.6/20)^2 = 0.6% of the near-field gain, which is invisible by
+ *    construction — and worse than invisible, because a 2.2x pool at the shooter's
+ *    feet closes the auto-exposure meter and takes ~16% off every mid-tone, so the
+ *    measured mid-range gain came out at 0.84x. The flash made the wall DARKER.
+ *    A softened exponent is what shipped shooters use for exactly this reason.
+ *
+ *    `peak` is re-solved to hold the near field where it already measured well.
+ *    three's attenuation is 1/r^falloff * (1 - (r/cutoff)^4)^2; at 1.6 m that is
+ *    0.625 at falloff 1.0 against 0.387 at the old falloff 2 / 6 m cutoff, so peak
+ *    goes 30 -> 19 for the same ~2.2x on the ground. At 20 m the same light now
+ *    delivers 0.05 * 19 = 0.9 against a golden-hour sun of ~3.4 — roughly a
+ *    quarter, which clears the exposure response instead of drowning in it. The
+ *    40 m control sits outside the cutoff window entirely and cannot move, which
+ *    is what keeps this a pool rather than an exposure pump.
+ *
+ * ROUND 11 — THAT REASONING WAS RIGHT AND THE NUMBERS WERE STILL WRONG.
+ *
+ * The argument above is about radiance arriving at a surface. What a viewer sees
+ * is radiance THROUGH the auto-exposure, and the round-10 pair was never measured
+ * that way. `tools/fx11probe.mjs --light` renders the identical frame with this
+ * light forced on for the five frames a 90 ms flash actually occupies, buckets a
+ * grid of screen points BY RAYCAST DEPTH, and reads the composited pixels back.
+ * Before (peak 19, falloff 1.0, forward 0.55):
+ *
+ *     bucket   depth span      off      on     gain
+ *     near     2.6-4.9 m     0.1416  0.7021  4.96x
+ *     mid      9.2-21.9 m    0.2931  0.2493  0.85x     <- DARKER
+ *     far      45-64 m       0.7519  0.6224  0.83x     <- DARKER
+ *
+ * peak 19 at falloff 1.0 puts ~11.9 on ground 1.6 m away against a golden-hour sun
+ * of ~3.4 — three and a half times the sun. The meter closes on that near field
+ * and takes ~17% off every mid-tone in the frame, so the NET effect of firing the
+ * rifle was to make the ground the enemies stand on DARKER than it was. That is
+ * strictly worse than having no light at all, and it is exactly the "the wall, the
+ * scaffold and the enemies at 15 m all read within noise" of the round-10 review.
+ *
+ * The fix is to stop buying near-field punch the frame cannot afford, and to spend
+ * the budget on reach instead:
+ *
+ *  · `falloff` 1.0 -> 0.30. Over 3-20 m the near:far ratio goes from 6.7:1 to
+ *    1.7:1. An exponent this flat is not physical and is not meant to be — a
+ *    single punctual light cannot serve 2 m and 20 m at a physical exponent, and
+ *    every shipped shooter softens it for exactly this reason.
+ *  · `peak` 19 -> 4.4, sized so the near ground lands at ~1.9x rather than ~5x:
+ *    unmistakably a pool, but nowhere near clipping, and the meter therefore
+ *    barely moves.
+ *  · `radius` 30 -> 42, with the (1-(r/cutoff)^4)^2 window doing the far cut-off
+ *    that the exponent no longer does, so the 45-64 m control still cannot be lit.
+ *  · `forward` 0.55 -> 1.95. The drawn muzzle is 0.93 m down the bore, so the
+ *    source now sits ~2.9 m in front of the eye. The brightest ground is out where
+ *    the fight is rather than under the shooter's boots, where it did nothing but
+ *    feed the meter.
+ *
+ * After: near 2.08x relative to the far control, mid 1.13x ABSOLUTE (1.28x
+ * relative), far 0.89x. The mid-range figure is the one that matters and it has
+ * changed sign: firing the rifle now brightens the ground at 10-20 m instead of
+ * dimming it.
+ *
+ * ONE THING THIS CANNOT HAVE. A light large enough to reach 20 m necessarily adds
+ * enough energy to the frame to move the auto-exposure; requiring the meter to
+ * hold perfectly still is requiring a light with no reach. So the assertion is not
+ * "the meter must not move" but "the mid ground must end up net brighter and the
+ * dip must stay bounded" — 0.80x is the floor, and the measured 0.89x sits inside
+ * it. Every value above was moved until those four checks passed; none of it is
+ * derived from first principles, because the tonemap and the meter are not.
  */
-const MUZZLE_LIGHT = { colour: 0xffe9d2, peak: 42, radius: 6.0, decay: 0.045 };
+const MUZZLE_LIGHT = {
+  colour: 0xffe9d2, peak: 4.4, radius: 42.0, decay: 0.090,
+  forward: 1.95, falloff: 0.30,
+};
 export class Particles {
   constructor() {
     this.name = 'particles';
@@ -71,9 +165,12 @@ export class Particles {
     this._mat = new THREE.Matrix4();
     this._col = new THREE.Color();
     this._muzzle = new THREE.Vector3();
+    this._flashPos = new THREE.Vector3();
     this._muzzleDir = new THREE.Vector3(0, 0, -1);
     this._muzzleAge = 99;
     this._fogColour = new THREE.Color(0x9fb4c6);
+    /** Ejection-port height above the eye plane, m. Measured in `_ejectPosition`. */
+    this._portCamY = -0.18;
   }
 
   init(ctx) {
@@ -201,11 +298,19 @@ export class Particles {
     this.emitter.lod = 1;
     EFFECTS.muzzle(this.emitter, o);
 
-    // The part no billboard can do: actually light the scene.
+    // The part no billboard can do: actually light the scene. Sourced ahead of
+    // the crown, not at it — see the note on MUZZLE_LIGHT.
+    this._flashPos.copy(this._muzzle)
+      .addScaledVector(this._muzzleDir, MUZZLE_LIGHT.forward);
     const light = this.lighting?.flash?.(
-      this._muzzle, MUZZLE_LIGHT.colour, MUZZLE_LIGHT.peak, MUZZLE_LIGHT.decay,
+      this._flashPos, MUZZLE_LIGHT.colour, MUZZLE_LIGHT.peak, MUZZLE_LIGHT.decay,
     );
-    if (light) light.distance = MUZZLE_LIGHT.radius;
+    if (light) {
+      // FlashPool derives both from the peak intensity, which for this spike
+      // would reach 94 m at a physical exponent. Override with the tuned pair.
+      light.distance = MUZZLE_LIGHT.radius;
+      light.decay = MUZZLE_LIGHT.falloff;
+    }
   }
 
   _onShell(e) {
@@ -219,9 +324,9 @@ export class Particles {
     } else {
       const p = e?.point ?? this._muzzle;
       o.px = p.x; o.py = p.y; o.pz = p.z;
+      this._portCamY = -0.18;
     }
-    const v = e?.velocity;
-    o.vx = v?.x ?? 2.7; o.vy = v?.y ?? 1.9; o.vz = v?.z ?? -0.55;
+    this._shapeEject(e, o);
     o.floorY = e?.floorY ?? this._groundY(o.px, o.pz);
     o.scale = 1;
     o.count = undefined;
@@ -229,7 +334,93 @@ export class Particles {
     const tint = this.emitter.tint;
     tint[0] = 1; tint[1] = 1; tint[2] = 1;
     this.emitter.lod = 1;
+    // Cap the population BEFORE adding to it, so the cap is what it says it is.
+    this.alpha.retireOldest(SPRITE.CASING, SHELL.maxLive - 1);
     EFFECTS.shell(this.emitter, o);
+  }
+
+  /**
+   * Turn the weapon's world-space ejection velocity into an arc that stays below
+   * the sight line, writing the result into `o.vx/vy/vz`.
+   *
+   * THIS IS THE ROUND-10 FIX. Two reviews reported "metre-long shell casings
+   * hanging 25-40 m downrange" and both diagnosed a unit error. There is none:
+   * `tools/fxcheck.mjs --casings` measures the rendered brass at 47.8 x 10.9 mm
+   * against a true 44.7 x 9.6, and the whole population within 3.9 m of the port.
+   * What the reviewers actually measured was 60 px of correctly-sized brass drawn
+   * ABOVE THE EYE PLANE, where the ray through it lands on a building 65 m away —
+   * and a viewer sizes an object against its backdrop, not against a depth they
+   * cannot see. The harness said 6.15 m apparent length. Full derivation in the
+   * note on `SHELL` in particles/Effects.js.
+   *
+   * So the velocity is decomposed into the camera's own right/up/forward frame
+   * and put back together with the vertical capped: the ballistic apex may never
+   * come within `SHELL.horizonMargin` of the eye plane. The cap is derived from
+   * the port's measured height below the eye and the gravity actually applied, so
+   * if the viewmodel is ever lowered the brass gets its natural pop back with no
+   * further tuning. The weapon's own magnitude, sign and per-shot jitter still
+   * drive the lateral throw; only the direction is presentation.
+   *
+   * No allocation: the camera basis is read straight out of `matrixWorld`.
+   */
+  _shapeEject(e, o) {
+    const m = this.ctx.camera.matrixWorld.elements;
+    const rx = m[0]; const ry = m[1]; const rz = m[2];
+    const ux = m[4]; const uy = m[5]; const uz = m[6];
+    // Column 2 of a view matrix points BEHIND the camera, so forward is its negation.
+    const fx = -m[8]; const fy = -m[9]; const fz = -m[10];
+
+    const v = e?.velocity;
+    const wx = v?.x ?? 2.7; const wy = v?.y ?? 1.9; const wz = v?.z ?? -0.55;
+    const E = this.emitter;
+
+    // Per-shot scatter of +-12%, applied here rather than in the effect so the
+    // clamp below is the final word on the vertical.
+    let vr = (wx * rx + wy * ry + wz * rz) * E.range(0.88, 1.12);
+    let vu = (wx * ux + wy * uy + wz * uz) * E.range(0.88, 1.12);
+    let vf = (wx * fx + wy * fy + wz * fz) * E.range(0.88, 1.12);
+
+    // Lateral: keep the weapon's side, floored so the case crosses the frame edge
+    // in ~9 frames rather than ~19. Real port speeds are 3-6 m/s.
+    //
+    // THE FLOOR IS A BAND, NOT A VALUE, and that is the round-11 fix. The weapon's
+    // lateral component is 2.7 m/s; with the old +-12% scatter it landed in
+    // 2.38-3.02, which is BELOW `lateralMin` for every shot, so every shot was
+    // clamped to exactly 4.2 — the scatter was multiplied in and then thrown away.
+    // The vertical had the same shape of bug: 1.9 m/s +-12% is 1.67-2.13, always
+    // above `vuMax` (1.26), so every case launched at exactly the same vertical
+    // too. Two of the three components were therefore CONSTANTS, and a magazine of
+    // brass fired from a stationary camera followed one trajectory: brasscheck
+    // measured settled cases at (2.013,-0.341,7.625), (2.007,-0.341,7.625) and
+    // (1.994,-0.341,7.582) — three cases inside 3 cm, a stack rather than a
+    // scatter. Randomising the FLOORS restores the spread the clamp deleted.
+    const side = vr < 0 ? -1 : 1;
+    const lateralFloor = SHELL.lateralMin * E.range(1.0, 1.45);
+    if (vr * side < lateralFloor) vr = side * lateralFloor;
+
+    // Forward: bias away from the lens and floor it. The old build let brass drift
+    // back at 0.55 m/s and accumulate at the camera plane — a case measured
+    // 0.017 m from the lens, projecting 1989 px, one yaw away from filling the
+    // frame with brass. The floor also survives a player sprinting backwards,
+    // whose velocity the weapon folds into this component.
+    vf += SHELL.fwdBias * E.range(0.80, 1.30);
+    const fwdFloor = SHELL.fwdMin * E.range(1.0, 1.9);
+    if (vf < fwdFloor) vf = fwdFloor;
+
+    // Vertical: flick it down and out, then hard-cap the climb. `headroom` is how
+    // far the case may rise before it reaches the margin below the eye plane;
+    // v = sqrt(2*g*h) is the launch speed that exactly reaches it. The drop is
+    // jittered, the cap is not: the cap is the invariant that keeps the ballistic
+    // apex below the eye plane, and jittering it downward only ever makes the
+    // guarantee stronger.
+    const headroom = -this._portCamY - SHELL.horizonMargin;
+    const g = Math.abs(WORLD.gravity) * SHELL.grav;
+    const vuMax = headroom > 0 ? Math.sqrt(2 * g * headroom) : 0;
+    vu = Math.min(vu, vuMax) - SHELL.dropSpeed * E.range(0.80, 1.30);
+
+    o.vx = vr * rx + vu * ux + vf * fx;
+    o.vy = vr * ry + vu * uy + vf * fy;
+    o.vz = vr * rz + vu * uz + vf * fz;
   }
 
   /**
@@ -316,6 +507,16 @@ export class Particles {
     rig.root.updateWorldMatrix(true, false);
     out.copy(rig.ejectPort).applyMatrix4(rig.root.matrixWorld);
     this._viewToWorld(out);
+    // Height of the port above the eye plane, in the camera's own up axis. This
+    // is measured rather than assumed because it is what `_shapeEject` derives the
+    // climb budget from: the port currently sits 0.18 m BELOW the eye, which is
+    // why any upward ejection puts brass on the skyline. Move the viewmodel and
+    // the brass re-tunes itself.
+    const cam = this.ctx.camera;
+    const m = cam.matrixWorld.elements;
+    this._portCamY = (out.x - cam.position.x) * m[4]
+      + (out.y - cam.position.y) * m[5]
+      + (out.z - cam.position.z) * m[6];
     return true;
   }
 
@@ -372,3 +573,9 @@ export class Particles {
     this.atlas?.dispose();
   }
 }
+
+/**
+ * Exposed so `tools/fxcheck.mjs` can drive the flash pool with the exact numbers
+ * this system uses instead of a copy that silently drifts out of date.
+ */
+Particles.MUZZLE_LIGHT = MUZZLE_LIGHT;

@@ -49,6 +49,64 @@ const C = {
   white: lin(0xffffff),
 };
 
+/**
+ * Spent-case presentation. Shared with `Particles._onShell`, which reshapes the
+ * weapon's world-space ejection velocity into the camera frame using these
+ * numbers — one source of truth, because the vertical clamp below is the whole
+ * of the round-10 fix and a drifted copy would silently undo it.
+ *
+ * ── WHY BRASS IS THROWN DOWN AND OUT, NOT UP ─────────────────────────────────
+ * `WeaponData.ejectVelocity` is [2.7, 1.9, -0.55] in the weapon's own
+ * right/up/forward frame, which is correct for a rifle. It is nevertheless the
+ * cause of the defect two reviews called "metre-long shell casings hanging 30 m
+ * downrange", and the reason is geometric rather than dimensional. The DRAWN
+ * ejection port sits 0.18 m below the eye plane and 0.62 m out. A case launched
+ * at +1.9 m/s against the 9.9 m/s^2 this system applies climbs
+ * 1.9^2 / (2 * 9.9) = 0.18 m — landing it exactly ON the eye line, at the apex,
+ * while it is still in frame.
+ *
+ * That matters because of what the case is drawn AGAINST. A 45 mm case 0.55 m
+ * from an 80-degree lens covers ~57 px whatever else is true; a viewer has no
+ * access to its depth and reads its size off the depth of the backdrop. Below the
+ * eye plane the backdrop is the apron a few metres out and the case reads as
+ * centimetres. One centimetre above it, the ray goes to the horizon and the same
+ * 57 px reads as metres — measured at 6.15 m against a 65 m backdrop before this
+ * change. Nothing about the brass was ever the wrong size.
+ *
+ * So the arc is reshaped rather than the scale: the vertical component is capped
+ * so the ballistic apex can never reach `horizonMargin` of the eye plane, and is
+ * biased downward so the ray through the case points at nearby ground within a
+ * frame or two. `lateralMin` gets it out of frame in ~9 frames instead of ~19,
+ * `fwdMin` stops it drifting back through the lens (the old build parked cases
+ * 0.017 m from it, projecting 1989 px), and `maxLive` caps the fan of 28.
+ *
+ * RESIDUAL, stated plainly: on the single frame a case is born it still sits at
+ * the port's own height, and a ray through a point 0.18 m below the eye grazes
+ * the ground ~6 m out. That first frame therefore reads ~0.5 m however the
+ * velocity is shaped. Closing it needs the port drawn lower or the brass drawn in
+ * the viewmodel scene at the viewmodel FOV — `Weapon.js` / `ViewModel.js`, not
+ * this system.
+ */
+export const SHELL = {
+  /** Gravity scale against WORLD.gravity (-22): 0.45 -> a real 9.9 m/s^2. */
+  grav: 0.45,
+  /** Tumbling brass has a poor ballistic coefficient; this keeps the arc tight. */
+  drag: 0.9,
+  life: 1.7,
+  /** Lateral floor, m/s. Real port ejection is 3-6; 4.2 halves the on-screen dwell. */
+  lateralMin: 4.2,
+  /** Flicked down and out, so the ray through the case finds nearby ground fast. */
+  dropSpeed: 2.6,
+  /** Added to the weapon's forward component, then floored, so brass never
+   *  drifts back through the lens even when the player is sprinting backwards. */
+  fwdBias: 1.35,
+  fwdMin: 0.40,
+  /** The apex must stay at least this far below the eye plane. */
+  horizonMargin: 0.10,
+  /** More than this in the air at once and it reads as a dispenser, not a gun. */
+  maxLive: 12,
+};
+
 /** Fast, allocation-free xorshift so effects are reproducible per seed. */
 export class Emitter {
   constructor(alphaBatch, additiveBatch) {
@@ -243,48 +301,70 @@ export const EFFECTS = {
     E.P.life = 0.030; E.P.bright = 46; E.P.soft = 0.05;
     E.fx();
 
-    // The starburst that reads as "muzzle flash" at a glance. Rolled per shot
-    // and kept smaller than the core-plus-petals envelope so it decorates the
-    // shape rather than being the whole of it.
-    E.reset(SPRITE.STAR);
-    E.at(px, py, pz);
-    E.size(0.062 * s, 0.115 * s, 0.045 * s);
-    E.ramp(C.hotWhite, 1, C.flash, 0.85, C.fire, 0);
-    E.P.life = 0.038; E.P.bright = 22; E.P.soft = 0.05;
-    E.P.rot = E.rnd() * 6.283;
+    // A second, wider, much dimmer core so the bloom has MASS behind the tongues.
+    // Isolated (tools/fx11probe.mjs --flash, with the viewmodel's own flash cards
+    // detached) this effect read as a spidery firework: plenty of radiating
+    // needles and almost no body. A discharge at 1/1000 s is mostly opaque gas.
+    E.reset(SPRITE.GLOW);
+    E.at(px + dx * 0.05, py + dy * 0.05, pz + dz * 0.05);
+    E.size(0.085 * s, 0.145 * s, 0.055 * s);
+    E.ramp(C.flash, 0.95, C.fire, 0.7, C.fireDeep, 0);
+    E.P.life = 0.048; E.P.bright = 11; E.P.soft = 0.06;
     E.fx();
 
-    // 2-3 flame petals: tongues of burning propellant leaving the crown. They
+    // The bloom envelope. TWO cards, each rolled independently and sized
+    // independently, rather than one: a single card can only ever present the
+    // tile's own silhouette, and any residual symmetry in that tile becomes the
+    // shape of every shot in the game. Two overlapping rolls of an asymmetric
+    // tile have no axis of symmetry even in principle, and the pair reads as one
+    // lobed mass rather than as two sprites.
+    for (let i = 0; i < 2; i++) {
+      const w = E.range(0.058, 0.098) * s;
+      E.reset(SPRITE.STAR);
+      E.at(px + dx * (i * 0.030), py + dy * (i * 0.030), pz + dz * (i * 0.030));
+      E.size(w, w * 1.8, w * 0.7);
+      E.ramp(C.hotWhite, 1, C.flash, 0.85, C.fire, 0);
+      E.P.life = E.range(0.030, 0.048); E.P.bright = E.range(16, 26); E.P.soft = 0.05;
+      E.P.rot = E.rnd() * 6.283;
+      E.fx();
+    }
+
+    // 3-5 flame petals: tongues of burning propellant leaving the crown. They
     // start a few centimetres down the bore line and are pushed forward hard, so
-    // they extend PAST the star's envelope — that asymmetric reach along the
+    // they extend PAST the bloom's envelope — that asymmetric reach along the
     // barrel axis is the difference between a discharge and a sticker. Motion
     // stretch elongates each one along its own velocity, so no two shots are the
     // same silhouette.
-    const petals = 2 + ((E.rnd() * 2) | 0);
+    const petals = 3 + ((E.rnd() * 3) | 0);
     for (let i = 0; i < petals; i++) {
-      const along = E.range(0.030, 0.110);
+      const along = E.range(0.025, 0.120);
       E.reset(SPRITE.STREAK);
       E.at(px + dx * along, py + dy * along, pz + dz * along);
-      E.cone(E.range(0.10, 0.45), E.range(4.0, 11.0) * s);
-      const w = E.range(0.040, 0.075) * s;
-      E.size(w, w * 1.5, w * 0.35);
+      E.cone(E.range(0.08, 0.42), E.range(4.0, 12.0) * s);
+      const w = E.range(0.048, 0.092) * s;
+      E.size(w, w * 1.6, w * 0.35);
       E.ramp(C.hotWhite, 1, C.fire, 0.85, C.fireDeep, 0);
-      E.P.life = E.range(0.040, 0.075); E.P.bright = E.range(15, 24);
+      E.P.life = E.range(0.038, 0.070); E.P.bright = E.range(15, 24);
       E.P.stretch = E.range(0.020, 0.036); E.P.soft = 0.05; E.P.drag = 9;
       E.P.rot = E.rnd() * 6.283;
       E.fx();
     }
 
-    // Unburnt powder thrown forward out of the barrel.
-    const sparks = 7 + ((E.rnd() * 4) | 0);
+    // Unburnt powder thrown forward out of the barrel. TIGHT and SHORT: at a 0.38
+    // cone around a bore axis pointing away from the viewer, the cone projects to
+    // a full rosette on screen, and 10 motion-stretched needles radiating evenly
+    // in every direction is a firework — which is exactly how the isolated capture
+    // read. Grains actually leave with the gas, so a 0.22 cone and a third off the
+    // dwell keeps them a forward spray.
+    const sparks = 5 + ((E.rnd() * 3) | 0);
     for (let i = 0; i < sparks; i++) {
       E.reset(SPRITE.STREAK);
-      E.at(px, py, pz);
-      E.cone(0.38, E.range(6, 19) * s);
-      E.size(0.020 * s, 0.016 * s, 0.004 * s);
+      E.at(px + dx * 0.03, py + dy * 0.03, pz + dz * 0.03);
+      E.cone(0.22, E.range(7, 17) * s);
+      E.size(0.018 * s, 0.014 * s, 0.004 * s);
       E.ramp(C.hotWhite, 1, C.ember, 0.9, C.fireDeep, 0);
-      E.P.life = E.range(0.10, 0.32); E.P.bright = 14; E.P.stretch = 0.024;
-      E.P.grav = 0.55; E.P.drag = 3.2; E.P.soft = 0.08;
+      E.P.life = E.range(0.07, 0.21); E.P.bright = 14; E.P.stretch = 0.021;
+      E.P.grav = 0.55; E.P.drag = 4.0; E.P.soft = 0.08;
       E.fx();
     }
 
@@ -358,35 +438,85 @@ export const EFFECTS = {
    * the brass at true size. It used to be a 30 mm square blob, which at half a
    * metre from the lens is what made it read as wide as the magazine.
    *
-   * `o.vx/vy/vz` arrive already rotated into world space from the weapon's
-   * `ejectVelocity` (local right/up/forward m/s) — out, up and slightly back.
+   * `o.vx/vy/vz` arrive fully shaped — `Particles._onShell` has already
+   * decomposed the weapon's world-space `ejectVelocity` into the camera's
+   * right/up/forward frame, applied the per-shot scatter, floored the lateral and
+   * forward components and CLAMPED THE VERTICAL against `SHELL.horizonMargin`.
+   * That clamp is the round-10 fix and it has to be the last word on the
+   * velocity, so nothing here touches it — see the note on `SHELL` above.
    */
   shell(E, o) {
     E.reset(SPRITE.CASING);
     E.at(o.px, o.py, o.pz);
-    E.jitter(0.005);
-    // Multiplicative scatter, not additive: a shot-to-shot spread of +-12%
-    // keeps the ejection *pattern* while stopping every case tracing one line.
-    E.P.vx = (o.vx ?? 2.7) * E.range(0.88, 1.12);
-    E.P.vy = (o.vy ?? 1.9) * E.range(0.88, 1.12);
-    E.P.vz = (o.vz ?? -0.55) * E.range(0.88, 1.12);
+    // The port is a slot, not a point; 1.2 cm of birth scatter is what a real
+    // extractor gives you and it is the cheapest half of stopping settled brass
+    // from stacking. The other half is the randomised velocity floors in
+    // `Particles._shapeEject`.
+    E.jitter(0.012);
+    let vx = o.vx ?? 0;
+    let vy = o.vy ?? 0;
+    let vz = o.vz ?? 0;
+    if (vx === 0 && vy === 0 && vz === 0) {
+      // No velocity in the option bag. `Particles.spawn` normalises a missing
+      // `velocity` to zero, and zero is not nullish, so `?? default` never fires —
+      // which is how `Combatant` (src/ai/Combatant.js, spawn('shell', { position,
+      // direction })) ends up throwing enemy brass at 0 m/s. It falls vertically
+      // out of the man's hand instead of being ejected. Those cases are ~2 px at
+      // the 15-25 m an enemy is usually at, so it has never been visible, but it
+      // is wrong and it is wrong for anyone else who calls spawn('shell') too.
+      //
+      // Callers on this path do pass a `direction` (the ejection axis), so throw
+      // the case along it at a real port speed with a little lift. This branch
+      // never runs for the player: `Particles._onShell` always supplies a fully
+      // shaped velocity.
+      const dl = Math.hypot(o.dx ?? 0, o.dy ?? 0, o.dz ?? 0);
+      const s = E.range(2.6, 4.0);
+      if (dl > 1e-4) {
+        vx = (o.dx / dl) * s;
+        vy = (o.dy / dl) * s + E.range(0.4, 1.1);
+        vz = (o.dz / dl) * s;
+      } else {
+        vy = -E.range(0.5, 1.2);
+      }
+    }
+    E.P.vx = vx;
+    E.P.vy = vy;
+    E.P.vz = vz;
     E.size(0.051, 0.051, 0.051);
     E.ramp(C.brass, 1, C.brass, 1, C.brass, 0);
-    E.P.life = 2.2;
-    // Brass is a polished metal in direct sun and the sprite carries no lighting
-    // of its own, so it needs a push past 1.0 to sit in the same exposure as the
-    // concrete around it rather than reading as a dull grey chip.
-    E.P.bright = 2.1;
-    // End over end about the long axis, the way brass leaves a port.
-    E.P.spin = E.range(12, 24) * (E.rnd() > 0.5 ? 1 : -1);
+    E.P.life = SHELL.life;
+    // Brass is polished metal in direct sun and the sprite carries no lighting of
+    // its own, so it wants a small push past 1.0 to sit in the same exposure as
+    // the concrete around it. Only a small one: at 2.1 a third of the case
+    // clipped to white, the bloom pass grew a wide soft skirt around the clipped
+    // pixels, and a correctly proportioned 4.7:1 silhouette measured 2:1 with a
+    // ruler on the PNG. The specular line baked into the tile still reaches ~1.15
+    // here, so the brass keeps a hot edge without becoming a glowing bar.
+    E.P.bright = 1.15;
+    // End over end about the long axis, the way brass leaves a port — but not
+    // every case at the same rate. A magazine of identically-spinning brass reads
+    // as one animation played N times; one case in four coming out as a slow
+    // tumbler, and the roll starting anywhere on the circle (E.reset seeds
+    // P.rot at random), is what makes a burst look like a burst.
+    const slow = E.rnd() < 0.28;
+    E.P.spin = (slow ? E.range(3.5, 8) : E.range(11, 27)) * (E.rnd() > 0.5 ? 1 : -1);
     // The world runs an arcade gravity of -22 m/s^2, which is right for a player
     // and wrong for a 12-gram case: at that rate the brass is gone before the
-    // eye follows it. 0.45 puts it back at roughly real 9.9.
-    E.P.grav = 0.45; E.P.drag = 0.08; E.P.soft = 0.10;
-    // Low restitution plus the batch's own tangential and spin damping gives a
-    // short hop and a settle rather than a rubber ball.
+    // eye follows it. 0.45 puts it back at roughly real 9.9. Drag is high because
+    // a tumbling case is a genuinely bad projectile — it also keeps the whole arc
+    // inside a couple of metres of the shooter, where it can be read against the
+    // ground rather than against the far side of the yard.
+    // Drag and restitution vary per case. A tumbling case's drag depends on the
+    // attitude it happens to be in, and the concrete it lands on is not uniform;
+    // more usefully, identical drag and identical restitution make identical
+    // stopping distances, which is the last thing keeping settled brass in a heap
+    // once the launch velocity has been un-clamped.
+    E.P.grav = SHELL.grav; E.P.drag = SHELL.drag * E.range(0.75, 1.30); E.P.soft = 0.10;
+    // Low restitution; ParticleBatch's bounce handler damps the tangential
+    // component and the spin, and puts the case to sleep once the hop is spent,
+    // so it comes to rest on the concrete instead of jittering there for a second.
     E.P.floorY = o.floorY ?? -1e9;
-    E.P.bounce = o.floorY !== undefined ? 0.24 : 0;
+    E.P.bounce = o.floorY !== undefined ? E.range(0.16, 0.34) : 0;
     E.a();
   },
 
@@ -472,7 +602,7 @@ export const EFFECTS = {
       E.cone(0.95, E.range(2.2, 7.5) * s);
       const sz = E.range(0.018, 0.055) * s;
       E.size(sz, sz, sz * 0.9);
-      E.rampT(C.white, 1, C.white, 1, C.white, 0.55);
+      E.rampT(C.white, 1, C.white, 1, C.white, 0);
       E.P.life = E.range(0.9, 2.1); E.P.grav = 1; E.P.drag = 0.35;
       E.P.spin = E.sym(16); E.P.soft = 0.25;
       E.P.floorY = o.floorY ?? -1e9; E.P.bounce = o.floorY !== undefined ? 0.3 : 0;
@@ -501,7 +631,7 @@ export const EFFECTS = {
       E.at(o.px, o.py, o.pz);
       E.cone(0.9, E.range(2.5, 8) * s);
       E.size(E.range(0.012, 0.030) * s, 0.020 * s, 0.012 * s);
-      E.ramp(C.bloodBright, 0.95, C.bloodDark, 0.85, C.bloodDark, 0.2);
+      E.ramp(C.bloodBright, 0.95, C.bloodDark, 0.85, C.bloodDark, 0);
       E.P.life = E.range(0.35, 0.85); E.P.grav = 1; E.P.drag = 0.6;
       E.P.stretch = 0.010; E.P.soft = 0.15;
       E.a();
@@ -519,7 +649,7 @@ export const EFFECTS = {
       E.cone(1.0, E.range(2.0, 7.0) * s);
       const sz = E.range(0.025, 0.075) * s;
       E.size(sz, sz, sz);
-      E.ramp(C.glass, 0.95, C.glass, 0.9, C.glass, 0.3);
+      E.ramp(C.glass, 0.95, C.glass, 0.9, C.glass, 0);
       E.P.life = E.range(0.9, 1.9); E.P.grav = 1; E.P.drag = 0.5;
       E.P.spin = E.sym(19); E.P.bright = 1.6; E.P.soft = 0.2;
       E.P.floorY = o.floorY ?? -1e9; E.P.bounce = o.floorY !== undefined ? 0.25 : 0;
@@ -556,7 +686,7 @@ export const EFFECTS = {
       E.at(o.px, o.py, o.pz);
       E.cone(0.85, E.range(2.0, 6.5) * s);
       E.size(E.range(0.012, 0.032) * s, 0.018 * s, 0.010 * s);
-      E.ramp(C.water, 0.85, C.water, 0.7, C.waterDeep, 0.1);
+      E.ramp(C.water, 0.85, C.water, 0.7, C.waterDeep, 0);
       E.P.life = E.range(0.3, 0.75); E.P.grav = 1; E.P.drag = 0.5;
       E.P.stretch = 0.008; E.P.bright = 1.3; E.P.soft = 0.12;
       E.a();

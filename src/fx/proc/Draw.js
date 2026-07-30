@@ -95,8 +95,28 @@ export function ridge2(x, y, octaves = 3, seed = 0) {
 /**
  * An atlas being painted: a flat RGBA byte buffer plus tile addressing.
  * `paint(index, fn)` walks a tile's pixels and calls
- * `fn(u, v, out)` with u,v in [0,1] (v up) — `out` is a reused 4-float scratch
- * array [r,g,b,a] in 0..1, so the callback allocates nothing.
+ * `fn(u, v, out)` with u,v in [0,1] — `out` is a reused 4-float scratch array
+ * [r,g,b,a] in 0..1, so the callback allocates nothing.
+ *
+ * ── ORIENTATION, AND THE BUG THAT LIVED HERE ─────────────────────────────────
+ * The buffer is handed to a `DataTexture`, whose `flipY` is false, so byte row 0
+ * of the array is uploaded as texture coordinate t = 0 and t rises with the row
+ * index. Both consumers (ParticleBatch and DecalField) derive a tile's UVs as
+ * `(row + uv) / rows` straight from `floor(index / cols)`, so tile row r MUST
+ * occupy byte rows [r*tileH, (r+1)*tileH) and painter-v must rise with the byte
+ * row.
+ *
+ * This class used to do the opposite of both: it placed tile row r at byte row
+ * (rows-1-r)*tileH and ran v downward, on the reasoning that "row 0 is the
+ * bottom of the texture; ImageData row 0 is the top" — true of a 2D canvas, not
+ * of a DataTexture. The result was that EVERY tile was fetched from the mirrored
+ * row: with a 4-row sheet, row 0 <-> row 3 and row 1 <-> row 2. Spent casings
+ * (sprite 7) were drawn with the EMBER tile and rendered as soft round dots;
+ * embers (sprite 11) were drawn with the CASING tile and rendered as tumbling
+ * brass, which is why a round-8 reviewer measured "casings twenty metres
+ * downrange at head height, rising, with no impacts and no shadows" — those were
+ * embers wearing the wrong sprite, and the real brass was invisible dots. Bullet
+ * holes were fetching smudges for the same reason.
  */
 export class AtlasCanvas {
   constructor(size, cols, rows) {
@@ -117,11 +137,12 @@ export class AtlasCanvas {
     const row = Math.floor(index / cols);
     if (row >= rows) return;
     const ox = col * T;
-    // Row 0 is the bottom of the texture; ImageData row 0 is the top.
-    const oy = (rows - 1 - row) * TH;
+    // Byte row (row * tileH) is texture t = row / rows — the same tile the
+    // consumers' `(row + uv) / rows` asks for. See the note on the class.
+    const oy = row * TH;
     const out = this._out;
     for (let py = 0; py < TH; py++) {
-      const v = 1 - (py + 0.5) / TH;
+      const v = (py + 0.5) / TH;
       const rowBase = ((oy + py) * size + ox) * 4;
       for (let px = 0; px < T; px++) {
         const u = (px + 0.5) / T;

@@ -234,6 +234,41 @@ export function slab(b, o) {
   }
 }
 
+/**
+ * A stair landing: a slab whose walking surface is genuinely flat.
+ *
+ * `slab()` wraps its deck in an edge frame that is 120 mm DEEPER than the deck
+ * and centred 10% of the thickness low, so the frame's top sits ~36 mm PROUD of
+ * the walking surface with a 35 mm chamfer on its arris. That is fine for a roof
+ * you never stand on and fatal at the head of a flight: the chamfer is a 45
+ * degree face, cos 45 = 0.7071, and PLAYER.maxSlope is 0.72 — so a 45 degree
+ * arris is 1.1 degrees TOO STEEP TO STAND ON. Arriving at the top tread the
+ * player's only contact was that arris, the controller read it as an unwalkable
+ * slope, refused to accelerate and pushed him back down the flight. Measured on
+ * the real controller: horizontal velocity pinned at 0.00 with +0.59 m/s of
+ * upward push, at the top tread of every flight in the map.
+ *
+ * So the fascia hangs BELOW the deck here, which is also where a downstand edge
+ * beam belongs in a real building, and the walking surface has no lip at all.
+ */
+export function landing(b, o) {
+  const t = o.thick ?? 0.24;
+  const mat = o.mat ?? 'concrete';
+  const top = o.y + t / 2;
+  slab(b, { ...o, thick: t, mat, edge: false });
+  // Fascia sits INSIDE the plan and hangs below the deck, so nothing it carries
+  // — not its face, not its chamfered arris — is ever above the walking surface.
+  const fd = o.fascia ?? 0.34;
+  for (const [fw, fdp, dx, dz] of [
+    [o.w, 0.18, 0, o.d / 2 - 0.09], [o.w, 0.18, 0, -(o.d / 2 - 0.09)],
+    [0.18, o.d - 0.36, o.w / 2 - 0.09, 0], [0.18, o.d - 0.36, -(o.w / 2 - 0.09), 0],
+  ]) {
+    if (fw <= 0.02 || fdp <= 0.02) continue;
+    b.box(o.edgeMat ?? mat, o.x + dx, top - 0.02 - fd / 2, o.z + dz, fw, fd, fdp,
+      { zone: o.zone, bevel: 0.03, tile: o.tile ?? 2.0 });
+  }
+}
+
 /** Pillar with base, shaft and capital — reads as structure, not a stretched cube. */
 export function pillar(b, o) {
   const w = o.w ?? 0.62, h = o.h ?? 3.6, mat = o.mat ?? 'concrete';

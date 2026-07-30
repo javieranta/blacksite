@@ -82,14 +82,37 @@ export class MuzzleFX {
     return this._seed / 4294967296;
   }
 
-  /** Fire a flash at `position`, pointing along `dir`. */
+  /**
+   * Fire a flash at `position`, pointing along `dir`.
+   *
+   * THE CARD SITS WELL DOWN THE BORE, AND IT IS SMALL.
+   *
+   * The review reads the enemy flash as "mis-parented to the head so enemies fire
+   * out of their faces". It is not mis-parented — measured, the card is 0.022 m
+   * from the barrel tip taken straight off the rendered geometry, and 0.68-1.03 m
+   * from the head bone. The defect is real anyway, and it is a framing problem
+   * rather than a parenting one:
+   *
+   *   - a man aiming at the camera has his barrel pointing AT the camera, so the
+   *     0.55 m of weapon between his chest and the muzzle foreshortens to nothing
+   *     and the muzzle projects within ~70 px of his head on a 170 px figure;
+   *   - the card was up to 0.82 m across (scale 1.5 x 0.55) with a bright
+   *     additive core, so a glow authored for a flash covered the man from chest
+   *     to helmet, and bloom finished the job.
+   *
+   * A real rifle flash is 0.10-0.20 m of luminous gas standing off the crown of
+   * the muzzle. Capping the card at 0.30 m and moving it 0.13 m down the bore puts
+   * the light in front of the weapon where it belongs, and — because it is now
+   * clearly forward of the man rather than centred on him — it no longer paints
+   * his face even when he is shooting straight down the lens.
+   */
   spawn(position, dir, scale = 1) {
     const it = this.items[this.next];
     this.next = (this.next + 1) % this.items.length;
     it.life = it.dur;
     it.scale = scale * (0.85 + this._rnd() * 0.4);
     it.roll = this._rnd() * Math.PI;
-    it.card.position.copy(position).addScaledVector(dir, 0.06);
+    it.card.position.copy(position).addScaledVector(dir, 0.13);
     it.spike.position.copy(position);
     // The cone is authored down -Z, which is exactly where lookAt points.
     it.spike.lookAt(
@@ -107,7 +130,8 @@ export class MuzzleFX {
       if (it.life <= 0) { it.card.visible = it.spike.visible = false; continue; }
       const k = it.life / it.dur;
       const s = it.scale * (0.55 + k * 0.85);
-      it.card.scale.setScalar(s * 0.55);
+      // 0.55 gave a card up to 0.82 m across on a 0.9 m carbine. See spawn().
+      it.card.scale.setScalar(Math.min(0.30, s * 0.21));
       it.card.quaternion.copy(camera.quaternion);
       it.card.rotateZ(it.roll);
       it.spike.scale.set(0.7 + k * 0.5, 0.7 + k * 0.5, 0.6 + k * 0.9);

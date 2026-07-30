@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { tubeAlong, boxUV } from '../GeoUtil.js';
 import { familyTint } from '../Clusters.js';
-import { DECAL, patch, segment, mergeQuads, openGround } from './GroundDress.js';
+import { DECAL, patch, segment, mergeQuads, openGround, seatQuads } from './GroundDress.js';
 
 /**
  * Ground incident. OWNER: props agent.
@@ -148,7 +148,7 @@ export function slabIncident(api, samples, {
 } = {}) {
   const { rng, probe } = api;
   const open = pool ?? openGround(samples);
-  const stats = { puddles: 0, cracks: 0, blooms: 0, paint: 0, quads: [] };
+  const stats = { puddles: 0, cracks: 0, blooms: 0, paint: 0, quads: [], wet: [] };
   if (!open.length) return stats;
   rng.shuffle(open);
   const quads = stats.quads;
@@ -169,8 +169,21 @@ export function slabIncident(api, samples, {
     }
     if (!low || drop < 0.006) continue;
     const w = rng.range(1.3, 3.4);
-    quads.push(patch(DECAL.puddle, s.x + rng.jit(0.5), s.y + 0.010, s.z + rng.jit(0.5),
-      w, w * rng.range(0.55, 0.95), rng.range(0, Math.PI * 2), TINT.damp));
+    const px = s.x + rng.jit(0.5), pz = s.z + rng.jit(0.5);
+    const d = w * rng.range(0.55, 0.95);
+    const yaw = rng.range(0, Math.PI * 2);
+    // The damp margin, in the matte batch: a puddle has a wet ring of concrete
+    // round it that is darker but not reflective.
+    quads.push(patch(DECAL.puddle, px, s.y + 0.010, pz, w, d, yaw, TINT.damp));
+    /*
+     * ...and the water itself, in the WET batch. This is the half that was
+     * missing for three rounds: at roughness 0.94 a puddle decal is a bluish
+     * matte smudge, and no amount of them reads as water. At roughness 0.05 over
+     * a dark base the same shape returns the sky and the sun, which is the only
+     * thing that says "wet" in an image. See Materials.js 'wet'.
+     */
+    stats.wet.push(patch(DECAL.puddle, px, s.y + 0.013, pz,
+      w * rng.range(0.55, 0.78), d * rng.range(0.55, 0.78), yaw, TINT.plain, 0.92));
     stats.puddles++;
   }
 
@@ -183,7 +196,15 @@ export function slabIncident(api, samples, {
     const w = rng.range(2.2, 4.6);
     quads.push(patch(DECAL.crack, s.x + rng.jit(1.0), g.point.y + 0.008, s.z + rng.jit(1.0),
       w, w * rng.range(0.7, 1.15), rng.range(0, Math.PI * 2), TINT.plain,
-      rng.range(0.6, 1.0)));
+      /*
+       * 1.3-2.0 WAS TOO MUCH, and tools/groundcheck.mjs said so in the one number
+       * that matters: pushing the broad cells up took hero-golden's AUTHORED share
+       * of 32-px block variance from +0.73 to -0.30. Saturating a soft, cloudy
+       * cell does not add detail, it lays a flat wash over the detail that was
+       * there. Alpha above 1 belongs on the high-frequency cells only — the tyre
+       * tread, which is a comb of hard bars — not on anything broad.
+       */
+      rng.range(0.9, 1.35)));
     stats.cracks++;
   }
   /*
@@ -237,9 +258,10 @@ export function slabIncident(api, samples, {
  * happen to intersect. A dark wash running out of the joint, thickest at the
  * wall and gone within half a metre, is the cheapest fix there is.
  */
-export function wallBaseWash(api, samples, { budget = 150 } = {}) {
+export function wallBaseWash(api, samples, { budget = 260 } = {}) {
   const { rng, probe } = api;
-  const near = samples.filter((s) => s.wallDist < 2.4 && s.wallNormal && s.level === 0);
+  // Upper floors have wall bases too, and the interior framing looks along one.
+  const near = samples.filter((s) => s.wallDist < 2.4 && s.wallNormal);
   if (!near.length) return { made: 0, quads: [] };
   rng.shuffle(near);
   const quads = [];
@@ -293,7 +315,8 @@ export function machineryOil(api, { budget = 40 } = {}) {
     const w = rng.range(0.5, 1.7);
     quads.push(patch(DECAL.oil, px, g.point.y + 0.011, pz,
       w, w * rng.range(0.7, 1.3), rng.range(0, Math.PI * 2),
-      _c.copy(TINT.plain).multiplyScalar(rng.range(0.85, 1.0)).clone()));
+      _c.copy(TINT.plain).multiplyScalar(rng.range(0.55, 0.8)).clone(),
+      rng.range(1.15, 1.5)));
     // a thin runnel away from the pool, downhill-ish
     if (rng.bool(0.45)) {
       const bx = px + Math.cos(a) * rng.range(0.6, 1.8);
@@ -365,9 +388,19 @@ export function groundIncident(api, samples) {
    * deliberately excludes it — so it gets its own pass over the enclosed
    * samples, at lower density and without the puddles (a hall floor drains).
    */
+  /*
+   * BUDGETS RAISED AND `level === 0` DROPPED, round 11.
+   *
+   * The old numbers came to 128 marks for every interior in the level put
+   * together, and tools/surfacecheck.mjs measured what that is worth in the
+   * image: in the `interior` framing the authored content moved 4.26% of floor
+   * pixels and left 99.3% of 32-px blocks untouched. The level restriction made
+   * it worse again — every mezzanine and upper deck was excluded outright, and
+   * the interior framing looks along one.
+   */
   const inside = slabIncident(api, samples, {
-    pool: samples.filter((s) => s.enclosure >= 0.62 && s.level === 0),
-    puddles: 12, cracks: 60, blooms: 46, paint: 10,
+    pool: samples.filter((s) => s.enclosure >= 0.62),
+    puddles: 18, cracks: 190, blooms: 150, paint: 34,
   });
   const wash = wallBaseWash(api, samples);
   const oil = machineryOil(api);
@@ -376,6 +409,21 @@ export function groundIncident(api, samples) {
   const quads = [
     ...drifts.quads, ...slab.quads, ...inside.quads, ...wash.quads, ...oil.quads,
   ];
+  /*
+   * Standing water goes into its own batch because it is the only ground mark in
+   * the level that is not an albedo change. See Materials.js 'wet': roughness
+   * 0.05 over a dark base, which is what makes it return the sky instead of
+   * looking like slightly bluer concrete. One extra draw call for the level.
+   */
+  const wetQuads = [...slab.wet, ...inside.wet];
+  const wetSeated = seatQuads(api.probe, wetQuads);
+  if (wetQuads.length) {
+    api.batcher.merge('wet', mergeQuads(wetQuads), api.mats.get('wet'),
+      { solid: false, castShadow: false, receiveShadow: false });
+  }
+  // Same contact guarantee as the other two decal batches — per quad, before the
+  // merge destroys the per-quad identity. See GroundDress.seatQuads.
+  const seated = seatQuads(api.probe, quads);
   if (quads.length) {
     api.batcher.merge('decal', mergeQuads(quads), api.mats.get('decal'),
       { solid: false, castShadow: false, receiveShadow: false });
@@ -391,6 +439,10 @@ export function groundIncident(api, samples) {
     wallWash: wash.made,
     oilPools: oil.made,
     floorCables: cables,
-    quads: quads.length,
+    decalsAirborne: seated.dropped,
+    decalsSeated: seated.seated,
+    decalWorst: +Math.max(seated.worst, wetSeated.worst).toFixed(3),
+    wetPools: wetQuads.length,
+    quads: quads.length + wetQuads.length,
   };
 }

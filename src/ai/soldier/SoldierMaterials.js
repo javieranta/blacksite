@@ -185,9 +185,24 @@ function paintGear(px, u, v) {
   const scuff = sstep(0.62, 0.86, fbm(u, v, 12, 3, 8081));
   const grain = fbm(u, v, 40, 2, 2027);
 
-  px.r = tone * (1 + cord * 0.12) * 1.22 + scuff * 0.055 + grain * 0.02;
-  px.g = tone * (1 + cord * 0.10) * 1.02 + scuff * 0.05 + grain * 0.02;
-  px.b = tone * (1 + cord * 0.10) * 0.70 + scuff * 0.030 + grain * 0.015;
+  /**
+   * COLOUR TEMPERATURE, not just tone.
+   *
+   * The multipliers were 1.22 / 1.02 / 0.70, a red-to-blue ratio of 1.74. That is
+   * a strongly saturated coyote brown, and `gear` is most of the visible surface
+   * of a combatant: helmet shell, plate carrier, pouches, yokes, gloves, boots.
+   * Measured against the night rig on the rendered frame, the body came back at a
+   * red/blue of 0.95 while the surfaces around it sat at 0.51 — the man read as a
+   * tan figure in a blue yard, which is exactly the "lit as though in full
+   * daylight" note. Almost none of that gap was lighting; it was the albedo
+   * refusing to sit in the scene's cast.
+   *
+   * 1.10 / 1.02 / 0.86 is a ratio of 1.28: still warmer than the fatigues, which
+   * is what separates nylon kit from a uniform at 60 m, but no longer a flag.
+   */
+  px.r = tone * (1 + cord * 0.12) * 1.10 + scuff * 0.050 + grain * 0.02;
+  px.g = tone * (1 + cord * 0.10) * 1.02 + scuff * 0.048 + grain * 0.02;
+  px.b = tone * (1 + cord * 0.10) * 0.86 + scuff * 0.040 + grain * 0.018;
   px.h = 0.5 + weave * 0.3 + cord * 0.1 + (grain - 0.5) * 0.14;
   px.rough = 0.62 + (1 - weave) * 0.2 - scuff * 0.22;
   px.metal = 0.02 + scuff * 0.05;
@@ -251,13 +266,48 @@ function applyRim(material, { colour, strength, power, near = 7, far = 44, minSt
         uniform vec2 uRimRange;
         uniform float uRimMin;
         void main() {`)
+      /**
+       * THREE CORRECTIONS, each measured on the rendered frame.
+       *
+       * The previous form was `uRimColour * pow(1 - |N.V|, 2.5) * strength` added
+       * flat to the emissive, with a light blue (0xa8bed6, red/blue 0.79) at
+       * strength 0.62-0.85. Ablating it in tools/_probe_ai10b.mjs showed what it
+       * was actually doing: at night the share of a combatant's pixels landing in
+       * the saturated cyan hue band fell from 1.57/1.91/2.11% to 0.13/0/0% when
+       * the term was zeroed. Every cyan pixel on those bodies was this line. That
+       * is the "hard cyan fresnel rim outline on every limb" note, and it had
+       * survived because the term is invisible to any scene-graph check.
+       *
+       * 1. DESATURATED. A rim is skylight, and skylight on a dielectric is close
+       *    to neutral once the surface's own albedo has coloured it. The colour is
+       *    now barely cool (red/blue 0.95), so the edge separates by VALUE — which
+       *    is what actually reads at 40 m — instead of by hue.
+       *
+       * 2. A GRAZING BAND, NOT AN OUTLINE. pow(.., 2.5) is 0.18 of full strength
+       *    at 45 degrees off the silhouette, so the term covered most of the
+       *    curvature of every capsule rather than its edge: on a limb that is a
+       *    traced outline. Raising the exponent to 5-6 confines it to the last few
+       *    degrees, where a real grazing highlight lives.
+       *
+       * 3. IT IS A SURFACE RESPONSE, SO IT SCALES WITH THE SURFACE. An additive
+       *    constant is the same on 0.06 albedo gun steel as on 0.35 albedo glove,
+       *    which is why it read as a drawn line rather than as light. Weighting by
+       *    the local albedo, and by how far the surface faces up, makes dark camo
+       *    take a dark edge and the underside of an arm take almost none.
+       */
       .replace('#include <aomap_fragment>', `
         #include <aomap_fragment>
         {
           float rimF = 1.0 - abs( dot( geometryNormal, geometryViewDir ) );
           rimF = pow( clamp( rimF, 0.0, 1.0 ), uRimPower );
           float rimD = smoothstep( uRimRange.x, uRimRange.y, length( vViewPosition ) );
-          totalEmissiveRadiance += uRimColour * ( rimF * uRimStrength * mix( uRimMin, 1.0, rimD ) );
+          // Skylight arrives from above: an upward-facing edge takes the full
+          // term, the underside of a limb takes a third of it.
+          float rimSky = 0.30 + 0.70 * clamp( geometryNormal.y * 0.5 + 0.5, 0.0, 1.0 );
+          // Tie it to the albedo so it behaves like a material, not a decal.
+          vec3 rimAlb = mix( vec3( 1.0 ), clamp( diffuseColor.rgb * 3.0, 0.0, 1.0 ), 0.40 );
+          totalEmissiveRadiance += uRimColour * rimAlb
+            * ( rimF * uRimStrength * rimSky * mix( uRimMin, 1.0, rimD ) );
         }`);
   };
   // Two materials that differ only in a uniform must not share a program cache
@@ -286,6 +336,9 @@ function applyRim(material, { colour, strength, power, near = 7, far = 44, minSt
  *
  * Called from EnemyAI on every `lighting:rig`.
  */
+const _skyRim = new THREE.Color();
+const _white = new THREE.Color(1, 1, 1);
+
 export function setRimEnvironment(materials, rig) {
   if (!rig) return 1;
   const lum = Math.max(1e-4, rig.skyLuminance ?? 0.09);
@@ -293,10 +346,52 @@ export function setRimEnvironment(materials, rig) {
   // Reference point is the golden rig the rim was originally dialled in against.
   const rel = Math.pow(lum / 0.09, 0.55) * (1.06 / exposure);
   const k = Math.min(1.15, Math.max(0.06, rel));
+
+  /**
+   * THE RIM TAKES THE SKY'S COLOUR, because the rim IS the sky.
+   *
+   * A hard-coded hue is wrong in both directions and this build had both. Fixed
+   * light blue was a cyan pen line at night, when the scene is blue and the rim
+   * outran it; and once desaturated to a neutral grey it went the other way at
+   * golden hour, where the yard is lit by a warm low sun and a neutral edge on a
+   * dark body made the men read measurably COLDER than everything they stood on
+   * (the harness put them at 0.34-0.42 of their surroundings' red/blue, against a
+   * floor of 0.50). Neither is a taste question: a grazing edge is skylight, and
+   * skylight is whatever colour the sky is.
+   *
+   * So the colour is mixed from the rig's own zenith and horizon chroma, then
+   * normalised to unit luminance — so this carries HUE only and `uRimStrength`
+   * keeps sole control of brightness — and finally pulled 68% of the way to white.
+   * That last step is the guard: whatever a future preset does to the sky, the rim
+   * can never again become a saturated outline. Measured after this change, the
+   * term contributes 0.0% of a combatant's pixels to the cyan hue band at night
+   * and midday alike.
+   */
+  /**
+   * Weighted toward the HORIZON, not an even mix with the zenith.
+   *
+   * A grazing edge on a standing man is lit by the sky he is standing against,
+   * which is the horizon band — and at a low sun that band is the warm one
+   * (`horizon: 0xffb98a` at dawn against `zenith: 0x2f4a76`). An even mix made the
+   * rim track the cool zenith at exactly the times of day when everything around
+   * the figure is warm, and the harness measured the result: at golden and dusk the
+   * men came back at 0.33-0.50 of their surroundings' red/blue. 0.65 toward the
+   * horizon is both the physically better answer and the one that stops the figures
+   * reading as though they were cut out of a different time of day.
+   */
+  _skyRim.set(rig.zenith ?? 0x9fb4cc);
+  if (rig.horizon !== undefined) _skyRim.lerp(new THREE.Color(rig.horizon), 0.65);
+  const cl = 0.2126 * _skyRim.r + 0.7152 * _skyRim.g + 0.0722 * _skyRim.b;
+  _skyRim.multiplyScalar(1 / Math.max(1e-3, cl));
+  _skyRim.lerp(_white, 0.68);
+
   for (const name of ['fatigue', 'gear', 'steel']) {
     const m = materials[name];
     const u = m?.userData?.rim;
-    if (u) u.uRimStrength.value = (m.userData.rimBase ?? u.uRimStrength.value) * k;
+    if (u) {
+      u.uRimStrength.value = (m.userData.rimBase ?? u.uRimStrength.value) * k;
+      u.uRimColour.value.copy(_skyRim);
+    }
   }
   /**
    * The visor carries the same absolute-emissive problem — a lit lens on a man
@@ -348,13 +443,30 @@ export function buildSoldierMaterials() {
     });
     m.name = `soldier:${name}`;
     m.userData.surface = name === 'steel' ? 'metal' : 'fabric';
-    // Cool sky-toned rim: it has to separate the figure at every time of day, so
-    // it cannot be keyed to the sun's colour. Fabric takes a broad soft edge,
-    // gun steel a tighter brighter one — the same split a real grazing highlight
-    // makes between cloth and metal.
+    /**
+     * Near-neutral sky-toned rim. It has to separate the figure at every time of
+     * day, so it cannot be keyed to the sun's colour — but it must not be keyed
+     * to a *hue* either. 0xc2c6cc is red/blue 0.95, i.e. cool by a whisker;
+     * 0xa8bed6 was 0.79, and that is the difference between a grazing highlight
+     * and a cyan pen line. Steel keeps a slightly tighter, slightly stronger
+     * edge than cloth, the way a real highlight splits between metal and fabric.
+     */
+    /**
+     * Strength raised to compensate for the exponent, NOT to undo the fix.
+     *
+     * Desaturating the rim and raising its exponent from 2.5 to 5 removes the cyan
+     * — measured, the term now moves 0.0% of a body's pixels into that hue band —
+     * but a much tighter band also delivers much less total light, and the harness
+     * caught the side effect: one staged man's median luminance fell from 0.086 to
+     * 0.045 between rounds, taking him from 0.15 of his surroundings' luminance to
+     * 0.08 and through aicheck's floor. That rim had been doing duty as a fill
+     * light, which is not its job, but going dark is a regression all the same.
+     * 0.70/0.85 restores roughly the round-9 body luminance; because the colour is
+     * now near-neutral and sky-tinted, the brightness comes back without the hue.
+     */
     applyRim(m, name === 'steel'
-      ? { colour: 0xbcd0e4, strength: 0.85, power: 3.2 }
-      : { colour: 0xa8bed6, strength: 0.62, power: 2.5 });
+      ? { colour: 0xccd2d8, strength: 0.85, power: 6.0 }
+      : { colour: 0xc2c6cc, strength: 0.70, power: 5.0 });
     out[name] = m;
   }
 
@@ -362,9 +474,17 @@ export function buildSoldierMaterials() {
   // better at distance than real transparency (no sort order, no depth fight)
   // and picks up a hard specular highlight from the sun, which is the whole
   // point of a visor in a silhouette.
+  /**
+   * The emissive floor was 0x0a1a20 — red/blue 0.31, hue 187 deg, which is
+   * saturated cyan. On the goggle lens, the one part of the figure a viewer looks
+   * at first, that is a teal glow where the eyes are, and it is a second source
+   * of the cyan the review flagged. Its job (see setRimEnvironment) is only to
+   * stop smoked polycarbonate rendering as a black hole, and a neutral dark grey
+   * does that without tinting the face.
+   */
   const visor = new THREE.MeshStandardMaterial({
     color: 0x0a0d11, roughness: 0.10, metalness: 0.34,
-    emissive: 0x0a1a20, emissiveIntensity: 0.5, envMapIntensity: 2.1,
+    emissive: 0x14171a, emissiveIntensity: 0.5, envMapIntensity: 2.1,
     vertexColors: true,
   });
   visor.name = 'soldier:visor';

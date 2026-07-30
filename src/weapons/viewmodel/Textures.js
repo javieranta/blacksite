@@ -514,42 +514,381 @@ function anodised(size = 512) {
 }
 
 /**
- * Tactical glove: a twill-woven synthetic with visible stitch rows. The weave
- * carries the normal map; the stitching is a periodic run of raised beads. Kept
- * coarse on purpose — a weave finer than the mip footprint aliases into a
- * shimmering hatch instead of reading as fabric.
+ * Tactical glove back: a twill-woven synthetic in coyote brown, with two
+ * crossing runs of stitching. The weave carries the normal map; the stitching is
+ * a periodic run of raised beads. Kept coarse on purpose — a weave finer than the
+ * mip footprint aliases into a shimmering hatch instead of reading as fabric.
+ *
+ * ─── THE VALUE IS THE WHOLE POINT ─────────────────────────────────────────
+ *
+ * This zone has now been lifted twice, and the first lift is worth recording
+ * because it was a correct diagnosis with an insufficient dose. It went from
+ * 0.0135-0.0195 linear (sRGB 36, DARKER than the polymer lower it grips) to
+ * 0.052-0.072 linear (sRGB ~78), which is 2x the polymer's albedo and was
+ * believed to be the fix.
+ *
+ * tools/handlegibility.mjs measured what that 2x albedo ratio actually became on
+ * screen: 1.145. Not 2x. Not even 1.3x. The hand pixels came out at displayed
+ * luminance 32.1 against the weapon's 28.0 — a 15% step, which is roughly the
+ * difference between two facets of the same object and nowhere near enough to
+ * declare a different one. Two things eat it:
+ *
+ *   1. THE TONE CURVE. Both values sit in the compressed shadow toe, where AgX
+ *      spends very little output range on a large input range. An albedo ratio
+ *      arrives on screen raised to something like the power 0.45.
+ *   2. THE LIGHTING IS NOT SHARED. The weapon's visible surfaces are its top and
+ *      its left flank, which take the key. The hands are on the underside and the
+ *      far flank, lit mainly by the blue fill and rim. So the hand's albedo is
+ *      multiplied by a *smaller* number than the weapon's — measured at 0.84 of
+ *      it — and it was arriving cooler than the gun as well (warmth -0.053 vs
+ *      -0.037), because the fill is 0x9fb4cc.
+ *
+ * A 2x albedo step therefore cannot survive. This is 0.235/0.170/0.088 linear —
+ * sRGB about (135, 116, 86), a mid coyote-brown glove, 5x the polymer's
+ * luminance and with an r:b ratio of 2.7 against the polymer's 1.1. Five times
+ * the albedo survives the toe as roughly 1.7-1.9x on screen, and a 2.7:1 red-blue
+ * ratio in the ALBEDO is warmth no cool fill light can cancel — which is the
+ * property that matters, because the fill is the light the hands actually get.
+ */
+/**
+ * Tactical glove back: a 2/1 TWILL synthetic in coyote brown, seamed and soiled.
+ *
+ * ─── WHY THIS WAS REBUILT: THE DETAIL WAS IN THE WRONG CHANNEL ────────────
+ *
+ * Round 10's tile was not featureless. Measured offline it carried 8.1 degrees of
+ * RMS weave tilt in its normal map, and the review at 6x still read the fingers as
+ * "bare wax". tools/handcheck.mjs then measured why, and it is the kind of answer
+ * no amount of looking at the tile could have given:
+ *
+ *   nrmShare = -0.02.  Forcing normalScale to ZERO on every hand material changed
+ *   the hands' on-screen local contrast by less than the frame noise. The normal
+ *   map was contributing nothing at all.
+ *
+ * tools/_nrmab.mjs took that apart clamp by clamp. Disabling the LOD fade, the
+ * tilt ceiling and the terminator guard together — every shader limiter stacked on
+ * the map — recovered 14.7 -> 17.2, and doubling normalScale on top of that got
+ * 18.4. So the clamps were real and they were also not the main story: even
+ * completely unclamped and at 2x, a normal map is worth about a sixth of this
+ * surface's contrast. The reason is the lighting. The hands sit on the weapon's
+ * underside and far flank; their illumination is an environment probe plus a
+ * hemisphere wrap plus a weak fill, and ALL THREE vary smoothly with the normal.
+ * There is no sharp light for a perturbed normal to catch. On a surface lit that
+ * way a normal map cannot produce micro-contrast no matter how steep it is.
+ *
+ * What CAN, on the same measurement: the AO channel. `aoMap` multiplies indirect
+ * light, indirect is very nearly all the light these hands get, and pushing the
+ * baked AO through a gamma took the same number 14.7 -> 21.2 at aoDetail 3 and
+ * 27.1 at 6 — twice the authority of the normal map, from the same tile.
+ *
+ * So the weave, the seam channels and the fibre interstices are authored here
+ * primarily as OCCLUSION and as ALBEDO, with height as the third channel rather
+ * than the first. That is an unusual weighting for a PBR bake and it is the
+ * correct one for this specific surface under this specific rig — which is a
+ * thing that had to be measured, because it is the opposite of the default
+ * instinct and the default instinct is what shipped twice.
  */
 function gloveFabric(size = 512) {
+  /**
+   * Diagonal ribs per tile. 20 over a 30 mm tile is a 1.5 mm twill line.
+   *
+   * Coarser than the 30 it was, and coarser than a real glove's face fabric,
+   * which is a deliberate trade made at the magnification the surface is
+   * actually seen at. A finger is 1.35 tiles round; at 30 ribs that is 40 ribs
+   * round a digit ~55 px wide, i.e. under three pixels a rib, which the mip
+   * chain and the tone curve between them reduce to a flat grey. Detail below
+   * what a pixel can hold is not detail — the same argument the phosphate tooth
+   * is authored on, one file up.
+   */
+  const RIBS = 20;
   return bake(size, {
-    slope: 0.19, slopeMax: 0.34, roughFloor: 0.76, toks: 0.80,
+    slope: 0.30, slopeMax: 0.55, roughFloor: 0.45, toks: 0.80,
     fill: (u, v, o, C) => {
-      const d1 = Math.sin((u + v) * 52 * Math.PI);
-      const d2 = Math.sin((u - v) * 52 * Math.PI + 1.1);
-      const weave = 0.5 + 0.24 * d1 + 0.13 * d2;
-      const fibre = vn(u, v, C(120), 5);
-      const dirt = fbm(u, v, 3, 83, C, 4);
-      // Stitch rows every third of a tile, beads along the row.
-      const rowV = Math.abs(((v * 3) % 1) - 0.5) * 2;
-      const bead = 0.5 + 0.5 * Math.sin(u * 48 * Math.PI);
-      const stitch = Math.pow(Math.max(0, 1 - rowV / 0.07), 2) * (0.45 + 0.55 * bead);
       /**
-       * VALUE, NOT JUST TEXTURE. This was 0.0135-0.0195 linear — sRGB 36, which
-       * is *darker* than the weapon's polymer lower (0.025-0.039, sRGB 48) and
-       * darker than its phosphate steel. A hand darker than the gun it is holding
-       * cannot be seen holding it: for four rounds the only hand geometry that
-       * reached the screen was read as part of the weapon, or as scenery. A dark
-       * coyote glove is sRGB 78 or so, which is 0.075 linear — 2.6x the polymer.
-       * That gap is what makes a finger legible against a receiver flank, and it
-       * is the difference between hands and another dark bracket.
+       * A REAL TWILL, not a symmetric diamond.
+       *
+       * The previous weave was sin((u+v)) plus sin((u-v)) at equal frequency,
+       * which is a square lattice rotated 45 degrees. Two things follow and both
+       * were visible at 6x: it has no direction, so it reads as printed mesh
+       * rather than as cloth; and its two families cancel at the nodes, so its
+       * contrast collapses exactly where a weave should be busiest. A twill has
+       * ONE dominant rib family running at a consistent angle, interrupted by the
+       * perpendicular yarn crossing under it. That asymmetry is the entire visual
+       * difference between fabric and netting.
+       *
+       * Frequencies are integers per tile in both u and v, so the tile still
+       * wraps. The steepest family is 67 cycles across 512 texels — 7.6 texels a
+       * cycle, comfortably above the six-texel floor the bake enforces on lattice
+       * noise, so this is representable rather than aliased into hash.
        */
-      const base = 0.0520 + 0.0200 * dirt;
-      o.r = base * (1.00 + 0.26 * weave) + stitch * 0.026;
-      o.g = base * (0.92 + 0.26 * weave) + stitch * 0.023;
-      o.b = base * (0.74 + 0.26 * weave) + stitch * 0.018;
-      o.rough = 0.92 - 0.08 * weave + 0.05 * (fibre - 0.5) - 0.07 * stitch;
+      const d = (u * 2 + v) * RIBS;
+      const dz = d - Math.floor(d);
+      // Rounded float on top, sharp valley between: a yarn lying over its
+      // neighbour, not a sine.
+      const rib = Math.pow(Math.sin(Math.PI * dz), 0.55);
+      const w = (u - v * 2) * RIBS * 0.9;
+      const wz = w - Math.floor(w);
+      const pick = 0.5 + 0.5 * Math.cos(2 * Math.PI * wz);
+      // Where a pick crosses over, the rib dips under it. That interruption is
+      // what stops 30 parallel ribs reading as corduroy.
+      const weave = rib * (0.62 + 0.38 * pick);
+      // The interstice — the hole between four yarns — is the deepest occlusion
+      // on the surface and the single feature that most says "woven".
+      const gap = Math.pow(Math.max(0, 1 - weave / 0.34), 2);
+      const fibre = vn(u, v, C(110), 5);
+      const dirt = fbm(u, v, 3, 83, C, 4);
+
+      /**
+       * NO SEAMS IN THIS TILE. This is the one change here that was made by
+       * looking rather than by reasoning, and it reversed a decision taken two
+       * paragraphs of comment ago.
+       *
+       * Crossing stitch runs were authored at 3 and 2 per tile, which is about
+       * one per phalanx at the density a FINGER's UVs have. The palm's UVs are
+       * nothing like a finger's: its section is 152 mm round against a finger's
+       * 40 mm, so the same tile repeats 5.1 times across it and the same two
+       * seam families arrived as ten stitch lines and six cross lines — a
+       * machine-regular lattice over the back of the hand. At 6x it read as
+       * quilting, or as a wireframe, and it was the loudest thing on the surface.
+       *
+       * A tiled texture fundamentally cannot place a seam, because a seam is a
+       * feature of the GARMENT and the tile does not know where on the garment it
+       * has landed. Only the geometry knows. So the seams moved to Hands.js —
+       * `lateralSeam` puts a bound panel edge down each digit's flank, the thumb
+       * crotch gets a real binding, the knuckle pads and the cuff carry their own
+       * rims — and this tile is left to do the one job a tile is actually good
+       * at, which is the weave.
+       */
+      // Grime settles into the weave; it is the only thing keeping a light glove
+      // from reading as a clean studio prop.
+      const grime = sstep(0.42, 0.88, dirt);
+      // Worn, burnished patches where the glove rubs the weapon. Low frequency
+      // and irregular, so it can never organise itself into a grid.
+      const rub = sstep(0.52, 0.90, fbm(u, v, 2, 419, C, 3));
+
+      /**
+       * VALUE HELD, CONTRAST TRIPLED.
+       *
+       * The base linear value is up 8% only, and only to pay for the AO gamma
+       * that Materials.js now applies — the measured cost of aoDetail 2.6 is
+       * about 8% of mean displayed luminance, and the hand-to-weapon value
+       * separation that landed in round 9 is a fix that must not be spent twice.
+       * Everything else here is contrast around that value, not more of it:
+       *
+       *   the weave modulates albedo by 0.55 where it modulated by 0.30
+       *   the interstices take albedo DOWN, which the old tile never did
+       *   the seam channel is a hard dark line, the beads a hard light one
+       *
+       * r:b stays at 2.08. That ratio is a defence against exactly one thing: a
+       * cool fill multiplying the albedo down to neutral. A previous round found
+       * 2.7 photographed as bare peach SKIN and cut it to 1.92; 2.08 with the
+       * fill desaturated is warmth the hand keeps without becoming flesh, and it
+       * is not the lever being pulled here.
+       */
+      const base = (0.2150 + 0.0700 * dirt) * (1 - 0.46 * grime);
+      const lit = 0.70 * weave + 0.06 * rub;
+      /**
+       * The interstice darkens PER CHANNEL, not uniformly.
+       *
+       * Same physics as the cavity term in Materials.js: light that goes into
+       * the hole between four yarns bounces off the yarns two or three times
+       * before it comes out, so it is multiplied by the fabric's albedo two or
+       * three times over. The hole is therefore a more saturated brown than the
+       * float beside it. Darkening all three channels equally instead makes the
+       * hole a grey, and a grey pixel dark enough to be lit only by a blue sky
+       * probe is exactly the pixel that fails the cyan assertion.
+       */
+      o.r = base * (0.780 + lit) * (1 - 0.30 * gap);
+      o.g = base * (0.608 + lit) * (1 - 0.42 * gap);
+      o.b = base * (0.375 + lit) * (1 - 0.56 * gap);
+      /**
+       * ROUGHNESS 0.46-0.70, and STRUCTURED.
+       *
+       * The brief band, and more usefully a band with the weave in it: a yarn
+       * float is burnished by wear and a bit smoother, the interstice between
+       * yarns is raw fibre and rougher, a stitch bead is polished thread. That
+       * spread is what gives the broad soft sheen a worn glove has somewhere to
+       * vary, which is the only specular cue available on a surface lit almost
+       * entirely by a smooth environment.
+       */
+      o.rough = 0.585 - 0.105 * weave + 0.115 * gap + 0.040 * (fibre - 0.5)
+        - 0.110 * rub + 0.050 * grime;
       o.metal = 0.0;
-      o.ao = 1 - 0.22 * (1 - weave);
-      o.h = weave * 0.55 + fibre * 0.04 + stitch * 1.0;
+      /**
+       * THE PRIMARY DETAIL CHANNEL — see the header. Mean is held near 0.90 and
+       * the swing is put into narrow deep valleys (interstices, seam channels)
+       * rather than into a broad wash, because a broad wash is just a darker
+       * glove and costs the value separation for nothing.
+       */
+      o.ao = clamp01(1 - 0.52 * gap - 0.18 * (1 - weave) - 0.08 * grime);
+      // Height is the third channel now, but it is not zero: the rib floats still
+      // want a grazing-key wobble, and the bake's auto-gain normalises whatever
+      // mix is authored here to the target RMS slope.
+      o.h = weave * 0.72 - gap * 0.34 + fibre * 0.04;
+    },
+  });
+}
+
+/**
+ * Glove palm and finger-pad leather: pebble-grained goat hide, warmer and a shade
+ * deeper than the fabric back, and markedly SMOOTHER — a worn palm has a sheen
+ * the woven back never gets.
+ *
+ * It exists for one reason: the palm band is the largest single camera-facing
+ * surface on either hand, and rendering it in the same material as the fingers
+ * that lie across it means the biggest shape on the hand has no internal
+ * boundary. Two materials meeting along the metacarpal line gives the eye a
+ * seam to read the palm's curvature against, and the roughness split does it
+ * without any value trickery: the leather picks up a broad soft highlight where
+ * the fabric stays matte.
+ */
+function gloveLeather(size = 256) {
+  return bake(size, {
+    slope: 0.22, slopeMax: 0.40, roughFloor: 0.40, toks: 0.85,
+    fill: (u, v, o, C) => {
+      // Pebble grain: two decorrelated cell noises, the finer one ridged so the
+      // grain has creases between the pebbles rather than only bumps.
+      const cell = vn(u, v, C(30), 211);
+      const fine = 1 - Math.abs(vn(u, v, C(58), 37) * 2 - 1);
+      const pebble = cell * 0.66 + fine * 0.34;
+      // The valley BETWEEN pebbles, as its own term. A pebble grain read only as
+      // bumps is a bumpy sheet; read as bumps with dark gaps it is hide. Same
+      // argument as the fabric's interstice, and the same channel does the work.
+      const gap = Math.pow(Math.max(0, 1 - pebble / 0.40), 2);
+      // Burnish: the pad of the palm and the finger pads polish smooth first.
+      const rub = sstep(0.48, 0.84, fbm(u, v, 3, 167, C, 3));
+      const crease = Math.pow(Math.max(0, 1 - Math.abs(((v * 4 + 0.2) % 1) - 0.5) * 2 / 0.09), 2);
+      // No tiled binding here either, and for the same measured reason as the
+      // fabric: the palm carries five repeats of this tile across its section, so
+      // any per-tile seam arrives as five parallel lines round the hand. The
+      // palm panel's real boundary is the arc where this material meets the
+      // fabric, which the geometry already draws.
+      // A shade deeper and a touch redder than the fabric back, which is how a
+      // hide palm panel actually reads — but held to the same desaturation the
+      // fabric got, or the palm becomes the peach brick the fabric stopped being.
+      const base = 0.1580 + 0.0480 * pebble;
+      o.r = base * (1.000 + 0.24 * pebble) * (1 - 0.22 * gap) + rub * 0.026;
+      o.g = base * (0.720 + 0.24 * pebble) * (1 - 0.34 * gap) + rub * 0.021;
+      o.b = base * (0.455 + 0.24 * pebble) * (1 - 0.48 * gap) + rub * 0.013;
+      /**
+       * The material split lives HERE, and it widened. 0.40-0.60 against the
+       * fabric's 0.46-0.70 was too close to part them: the review could see the
+       * palm panel's outline (the geometry gives it one) and not that it was a
+       * different substance. Hide is genuinely glossier than a woven back, and
+       * on a surface whose only light is a smooth environment the specular lobe
+       * is most of what a material has left to say.
+       */
+      o.rough = 0.545 - 0.145 * rub + 0.08 * (pebble - 0.5) + 0.07 * crease
+        + 0.10 * gap;
+      o.metal = 0.0;
+      o.ao = clamp01(1 - 0.44 * gap - 0.12 * (1 - pebble) - 0.26 * crease);
+      o.h = pebble * 0.74 - gap * 0.32 - crease * 0.85;
+    },
+  });
+}
+
+/**
+ * WRIST CUFF: a neoprene gauntlet with a hook-and-loop closure.
+ *
+ * It exists because the review found "no wrist cuff; a hard diagonal colour
+ * break butts hand to sleeve". That break is real and it is a MATERIAL problem
+ * before it is a geometry one: two tubes meeting end to end, one glove-coloured
+ * and one sleeve-coloured, produce a line across the arm with nothing on it. A
+ * real glove solves this by overlapping — the cuff is a third piece that laps
+ * over the sleeve and is bound to the glove, so the transition is 40 mm of a
+ * different substance rather than a join.
+ *
+ * Its value sits deliberately BETWEEN the two it separates: lighter than the
+ * ripstop so the eye does not stop at it, darker than the glove so the hand
+ * stays the brightest thing on the rig. The nap is fine and dense, which under a
+ * smooth environment reads as a matte velvet band — the opposite of both
+ * neighbours and therefore legible against both.
+ */
+function gloveCuff(size = 256) {
+  return bake(size, {
+    slope: 0.24, slopeMax: 0.42, roughFloor: 0.66, toks: 0.80,
+    fill: (u, v, o, C) => {
+      /**
+       * Loop nap: dense, near-isotropic, FINE, and low contrast.
+       *
+       * The first pass authored this at the glove's contrast and it photographed
+       * as a black basket-weave band — a tyre, or a rubber grip sleeve, and much
+       * darker than the ripstop it is supposed to sit between. A velvet loop face
+       * is the least contrasty surface on the whole rig: it is what it is because
+       * light goes into it and does not come back, so its detail is a fine even
+       * tooth, not a lattice.
+       */
+      const nap = vn(u, v, C(74), 401) * 0.55 + vn(u, v, C(40), 17) * 0.45;
+      const napGap = Math.pow(Math.max(0, 1 - nap / 0.38), 2);
+      // The elastic gathers, running around the cuff: shallow parallel folds.
+      const gather = 0.5 + 0.5 * Math.cos((u * 7) * Math.PI * 2);
+      const fold = Math.pow(gather, 1.8);
+      const dirt = fbm(u, v, 3, 313, C, 3);
+      const grime = sstep(0.40, 0.86, dirt);
+      /**
+       * VALUE BETWEEN ITS TWO NEIGHBOURS, WHICH IS THE WHOLE JOB.
+       *
+       * 0.128 linear against the glove's 0.190 and the ripstop's 0.058. That
+       * ordering is the entire reason this piece exists: the eye has to be able
+       * to follow hand -> cuff -> sleeve as a limb going out of frame, and a cuff
+       * darker than the sleeve inverts that and turns the wrist into the darkest
+       * point on the arm, which is where a coupling would be.
+       */
+      const base = (0.1420 + 0.0330 * dirt) * (1 - 0.26 * grime);
+      o.r = base * (0.940 + 0.16 * nap + 0.09 * fold) * (1 - 0.16 * napGap);
+      o.g = base * (0.762 + 0.16 * nap + 0.09 * fold) * (1 - 0.24 * napGap);
+      o.b = base * (0.520 + 0.16 * nap + 0.09 * fold) * (1 - 0.36 * napGap);
+      // Velvet: high and nearly flat. The mattest zone on the rig by design.
+      o.rough = 0.865 - 0.045 * nap + 0.040 * napGap + 0.030 * grime;
+      o.metal = 0.0;
+      o.ao = clamp01(1 - 0.30 * napGap - 0.14 * (1 - gather));
+      o.h = nap * 0.34 + fold * 0.62;
+    },
+  });
+}
+
+/**
+ * Knuckle-armour and finger-pad rubber. A separate zone from the weapon's
+ * `rubber`, which is deliberately near-black for the buttpad and the eyecup.
+ *
+ * At the glove's new albedo a near-black pad is a 13:1 step and the knuckle row
+ * turns into four holes punched in the hand. Four times the glove is the ratio
+ * that separates four knuckles into four knuckles: dark enough to be armour,
+ * light enough to still be part of the same object.
+ */
+function padRubber(size = 256) {
+  return bake(size, {
+    slope: 0.150, slopeMax: 0.30, roughFloor: 0.62, toks: 0.80,
+    fill: (u, v, o, C) => {
+      const cell = vn(u, v, C(36), 3);
+      const fine = vn(u, v, C(58), 71);
+      const dust = fbm(u, v, 3, 29, C, 3);
+      // Moulded hex dimple pattern, coarse enough to survive minification.
+      const a = (u + v) * 16, b = (u - v) * 16;
+      const fa = Math.abs(a - Math.floor(a) - 0.5) * 2;
+      const fb = Math.abs(b - Math.floor(b) - 0.5) * 2;
+      const dimple = Math.max(0, 1 - (fa + fb) * 0.80);
+      // The moulding line between dimples, as its own occlusion term — same
+      // argument as the fabric's interstice. On a pad that is only ever seen at
+      // foreground magnification, the gap between features is what carries the
+      // read, not the features.
+      const web = Math.pow(Math.max(0, 1 - dimple / 0.34), 2);
+      /**
+       * LIGHTER, AND MUCH LESS OCCLUDED. The first pass at this drove the base
+       * down with `web` and pushed AO to 0.46 on top of an aoDetail gamma of 2.2,
+       * and the knuckle armour photographed as a black triangular HOLE punched in
+       * the back of the hand — the exact failure this zone was split off the
+       * weapon's near-black `rubber` to avoid, arrived at from the other
+       * direction. 0.076 against the glove's 0.190 is a 2.5:1 step: dark enough
+       * to be a different substance, light enough to still be part of the hand.
+       */
+      const base = 0.0760 + 0.0180 * dust;
+      o.r = base * (0.99 + 0.16 * cell + 0.22 * dimple);
+      o.g = base * (0.95 + 0.16 * cell + 0.22 * dimple);
+      o.b = base * (0.88 + 0.16 * cell + 0.22 * dimple);
+      o.rough = 0.700 - 0.14 * dimple - 0.05 * cell + 0.09 * web + 0.04 * (fine - 0.5);
+      o.metal = 0.0;
+      o.ao = clamp01(1 - 0.14 * (1 - cell) - 0.24 * web);
+      o.h = cell * 0.55 + dimple * 0.95 - web * 0.35 + fine * 0.05;
     },
   });
 }
@@ -590,21 +929,30 @@ function ripstop(size = 256) {
       const gv = Math.pow(Math.max(0, 1 - Math.abs(((v * 7) % 1) - 0.5) * 2 / 0.10), 2);
       const grid = Math.max(gu, gv);
       const dirt = fbm(u, v, 3, 199, C, 4);
-      // Lifted with the glove, and a step lighter again: the support forearm is
-      // the largest single piece of the hand rig on screen (~450 px crossing the
-      // frame to the bottom-left corner) and it has to separate from the
-      // receiver flank it crosses in front of. Faded olive-drab ripstop.
-      // Held level with the glove rather than a step above it. A sleeve lighter
-      // than the glove made the forearm the brightest object in the lower half of
-      // the frame, which is how a 450 px tube ends up reading as scenery instead
-      // of as the darker thing at the end of the lighter thing that holds a gun.
-      // Coyote, not olive. A green sleeve is the odd note in a scene lit by a low
-      // sun through dust: everything else in frame is warm, so the one cool
-      // object reads as not belonging to the weapon or the shooter.
-      const base = 0.0520 + 0.0205 * dirt;
+      /**
+       * A CLEAR STEP BELOW THE GLOVE, and that ordering is deliberate.
+       *
+       * Coyote, not olive: a green sleeve is the odd note in a scene lit by a low
+       * sun through dust, so the one cool object reads as belonging to neither
+       * the weapon nor the shooter. But it must also stay DARKER than the glove.
+       * The forearm is the largest single piece of the hand rig on screen (~450 px
+       * crossing to the bottom-left corner) and when it was the brightest thing
+       * in the lower half of the frame it read as a pipe lying in the level. A
+       * dark sleeve ending in a light hand is a limb; a light sleeve ending in a
+       * dark hand is plumbing.
+       *
+       * Lifting this in step with the glove was tried and reverted the same
+       * round: at 0.088 the forearm became the brightest tube in the lower half
+       * of the frame and read, exactly as it had two rounds earlier, as a length
+       * of pipe with a coupling on it. The glove's job is to be the lightest
+       * thing on the rig, and the sleeve's job is to be dark enough that the eye
+       * follows it out of frame rather than stopping on it. 0.058 is a third of
+       * the glove.
+       */
+      const base = 0.0580 + 0.0215 * dirt;
       o.r = base * (0.98 + 0.20 * weave) * 1.10;
-      o.g = base * (0.94 + 0.20 * weave) * 0.93;
-      o.b = base * (0.86 + 0.20 * weave) * 0.60;
+      o.g = base * (0.94 + 0.20 * weave) * 0.84;
+      o.b = base * (0.86 + 0.20 * weave) * 0.52;
       o.rough = 0.93 - 0.06 * weave - 0.05 * grid;
       o.metal = 0.0;
       o.ao = 1 - 0.18 * (1 - weave);
@@ -646,6 +994,9 @@ export function bakeWeaponTextures(scale = 1) {
     stipple: stipple(s(256)),
     alu: anodised(s(512)),
     glove: gloveFabric(s(512)),
+    leather: gloveLeather(s(256)),
+    cuff: gloveCuff(s(256)),
+    padrubber: padRubber(s(256)),
     rubber: rubber(s(256)),
     sleeve: ripstop(s(256)),
     brass: brassCase(s(128)),

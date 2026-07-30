@@ -5,6 +5,7 @@ import {
   buildChainLink, buildFoliage, TILING,
 } from './TexPainters.js';
 import { buildTreeline, buildPlume, buildDecalAtlas } from './paint/Extras.js';
+import { buildGrimeAtlas } from './paint/GrimeAtlas.js';
 import { WEAVE_UV as SANDBAG_WEAVE_UV } from './parts/Sandbags.js';
 
 /**
@@ -245,6 +246,92 @@ export class PropMaterials {
        */
       vertexColors: true,
     }, 'concrete', 'concrete');
+
+    /* --- standing water ---------------------------------------------------
+     * THE ONE THING THE DECAL BATCH CANNOT DO. Every ground mark in this system
+     * shares one material at roughness 0.94, so a "puddle" could only ever be a
+     * slightly bluer patch of matte concrete — which is why three rounds of
+     * adding puddle decals did not produce anything a reviewer would call a
+     * puddle. Water is not an albedo change, it is a ROUGHNESS change: near-zero
+     * roughness over a dark base, so it picks up the sky and the sun and reads as
+     * wet from any angle.
+     *
+     * Same atlas, same alpha shapes, one extra draw call for the whole level.
+     */
+    this._std('wet', {
+      map: decalMap, transparent: true, opacity: 1,
+      depthWrite: false, roughness: 0.05, metalness: 0.0, side: THREE.FrontSide,
+      polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -6,
+      color: 0x20262c, vertexColors: true, envMapIntensity: 1.35,
+    }, 'concrete', 'concrete_wet');
+
+    /* --- the grime / AO multiply layer -------------------------------------
+     * THE DEFECT IT EXISTS FOR
+     *   "the bottom 30% of interior, the centre deck of combat and hud ... are
+     *    uniform slabs carrying a noise grain and a couple of seam lines — no
+     *    decals, no grime gradient at wall bases, no drainage staining".
+     *
+     * WHY IT CANNOT BE ANOTHER `decal` BATCH
+     *   The decal material alpha-blends: inside a mark, the slab's own albedo,
+     *   normal detail and grain are REPLACED in proportion to alpha. That is
+     *   correct for a stain sitting on top of concrete and wrong for dirt,
+     *   which is a modulation OF the concrete. It is also why the round-9 try
+     *   at broad soft washes measured worse rather than better (see the note in
+     *   parts/GroundIncident.slabIncident): a big soft alpha-blended cell lays a
+     *   flat value over the detail it was supposed to enrich.
+     *
+     * THE BLEND
+     *   premultiplied source, srcFactor = DST_COLOR, dstFactor = 1 - SRC_ALPHA:
+     *
+     *       out = dst * (a * rgb) + dst * (1 - a) = dst * mix(1, rgb, a)
+     *
+     *   This is the same resolution the impact system already uses for bullet
+     *   holes (src/fx/impacts/DecalAtlas.js, "MULTIPLY tiles"), for the same
+     *   reason stated there: "A lit quad pasted on top would flatten all of it."
+     *
+     *   i.e. a true tinted multiply with a per-fragment strength. Every bit of
+     *   texture, normal shading and shadow underneath survives inside the mark,
+     *   so a grime quad can be six metres across and still not read as a
+     *   sticker. Destination alpha is explicitly left alone (ZERO/ONE) so the
+     *   post chain's composite is unaffected.
+     *
+     * COST
+     *   MeshBasicMaterial: no lights, no shadow lookups, one texture fetch. This
+     *   is the cheapest fragment in the build, which is what makes a layer this
+     *   large affordable at all — the same coverage in the lit decal material
+     *   took the combat framing under 1 fps when it was tried.
+     */
+    const grimeMap = buildGrimeAtlas(T, 1024);
+    const grime = new THREE.MeshBasicMaterial({
+      map: grimeMap,
+      transparent: true,
+      premultipliedAlpha: true,
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.DstColorFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
+      blendSrcAlpha: THREE.ZeroFactor,
+      blendDstAlpha: THREE.OneFactor,
+      depthWrite: false,
+      side: THREE.FrontSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -4,
+      polygonOffsetUnits: -4,
+      vertexColors: true,
+      /*
+       * NO FOG. The fog chunk mixes the fragment toward the fog COLOUR, and this
+       * fragment is a multiplier, not a radiance — fogging it would blend the
+       * multiplier toward a bright grey and quietly darken the whole distance
+       * band. Grime is only ever written inside the survey radius, where the
+       * aerial perspective on the surface beneath it is doing that job already.
+       */
+      fog: false,
+      toneMapped: false,
+    });
+    grime.name = 'prop_grime';
+    grime.userData.surface = 'concrete';
+    grime.userData.forgeName = null;
+    this.map.set('grime', grime);
 
     return this;
   }

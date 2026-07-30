@@ -89,8 +89,16 @@ export class SoldierAnim {
   /**
    * @param bones  array of THREE.Bone in BONES order
    * @param rng    deterministic per-agent rng
+   * @param index  the man's spawn ordinal, used to round-robin the posture
+   *   archetype. Drawing the archetype from the rng instead looks correct and is
+   *   not: nine men sampling five rows independently collide about six times by
+   *   the birthday argument, and a collision is two men with the same stance
+   *   topology — which is precisely the "two poses across ten figures" the review
+   *   reported. Round-robin makes any five consecutive men structurally distinct
+   *   by construction, and every continuous term inside the row is still drawn
+   *   from the rng, so no two men are alike even when they share a row.
    */
-  constructor(bones, rng) {
+  constructor(bones, rng, index = 0) {
     this.bones = bones;
     this.rng = rng;
     this.phase = rng();
@@ -115,10 +123,18 @@ export class SoldierAnim {
      * deliberately modest: this is the difference between individuals, not
      * between styles.
      */
+    /**
+     * Ranges widened across the board. The previous spans were deliberately
+     * "modest" — ±25% on most terms — and the harness showed what modest bought:
+     * three staged men at 7 m with knee angles of 31/49, 30/51 and 31/49 degrees
+     * and foot spreads of 0.235, 0.249, 0.257 body-heights. Individual variation
+     * has to be visible at 200 px to count as variation at all, so `width`,
+     * `drop`, `blade` and `toe` now span roughly 2:1 rather than 1.3:1.
+     */
     const P = {
-      width: 0.80 + rng() * 0.50,        // stance width
-      drop: 0.75 + rng() * 0.55,         // how deep he sits into the stance
-      blade: 0.78 + rng() * 0.50,        // fore/aft foot stagger
+      width: 0.55 + rng() * 1.15,        // stance width
+      drop: 0.45 + rng() * 1.35,         // how deep he sits into the stance
+      blade: 0.55 + rng() * 1.15,        // fore/aft foot stagger
       weight: rng() * 2 - 1,             // standing weight bias, left/right
       carry: rng() * 2 - 1,              // muzzle carry height at low ready
       cant: rng() * 2 - 1,               // weapon cant
@@ -128,8 +144,76 @@ export class SoldierAnim {
       shoulder: rng() * 2 - 1,           // shoulder height asymmetry
       breath: 0.78 + rng() * 0.46,       // breathing rate
       scan: 0.55 + rng() * 0.85,         // idle head scan amplitude
-      toe: 0.70 + rng() * 0.65,          // how far the trailing foot turns out
+      toe: 0.55 + rng() * 1.05,          // how far the trailing foot turns out
     };
+
+    /**
+     * POSTURE ARCHETYPE — the part the previous build was missing.
+     *
+     * Scaling twelve constants by ±25% desynchronises a squad on paper and does
+     * nothing at all in the image, and the harness proves it: three staged men at
+     * 7 m came back with knee angles of 31/49, 30/51 and 31/49 degrees, foot
+     * spreads of 0.235, 0.249 and 0.257 body-heights, and a pairwise joint RMS of
+     * 0.083 rad. They were the same man three times, because every term that
+     * shapes a standing fighting stance was multiplied — never switched — and a
+     * multiplied term cannot change a topology.
+     *
+     * These three do change it. `lead` flips WHICH foot is forward, so an
+     * archetype-2 rifleman stands in a mirrored stagger rather than a slightly
+     * wider one. `crouchBias` puts a man permanently down in his knees whatever
+     * the brain asked for, which moves the hips, both knees, the spine and the
+     * weapon line together. `leanOut` rolls the trunk off vertical, the posture of
+     * a man working the edge of cover. The result is three structurally different
+     * silhouettes rather than one silhouette at three sizes.
+     */
+    /**
+     * FIVE archetypes, not three, and each one is a table row rather than a
+     * scatter of conditionals.
+     *
+     * Three was not enough for a section of nine: with nine men drawing uniformly
+     * from three rows, the expected number of *repeated* rows is six, and the
+     * review counted exactly that — "only two poses across roughly ten figures".
+     * Five rows over nine men, each row also carrying its own continuous jitter,
+     * is the difference between a squad and a rank.
+     *
+     *   lead        which foot leads, and by how much. Negative mirrors the
+     *               stagger, so the man stands in a different FOOTPRINT rather
+     *               than a wider version of the same one.
+     *   crouchBias  permanent sit into the knees, independent of what the brain
+     *               asked for. Moves hips, both knees, the spine and the weapon
+     *               line together, so it changes the silhouette's topology.
+     *   leanOut     trunk rolled off vertical — a man working the edge of cover.
+     *   widthMul    stance width multiplier on top of P.width.
+     *   pitchBias   trunk pitch, so one man is folded over the gun and another
+     *               stands tall behind it.
+     */
+    const ARCH = [
+      // upright, square, weight even — the man standing tall behind his rifle
+      { lead: 1.00, crouch: [0.00, 0.00], lean: 0.00, widthMul: 0.92, pitch: -0.04 },
+      // low fighter, deep in the knees, wide base
+      { lead: 0.85, crouch: [0.26, 0.26], lean: 0.04, widthMul: 1.24, pitch: 0.07 },
+      // mirrored stagger, leaning out past cover
+      { lead: -0.62, crouch: [0.08, 0.10], lean: 0.15, widthMul: 1.02, pitch: 0.02 },
+      // narrow, bladed hard, folded over the weapon
+      { lead: 1.35, crouch: [0.04, 0.14], lean: -0.10, widthMul: 0.70, pitch: 0.12 },
+      // very wide, shallow, almost side-on
+      { lead: 0.45, crouch: [0.14, 0.16], lean: -0.17, widthMul: 1.38, pitch: -0.02 },
+    ];
+    const arch = ((index % ARCH.length) + ARCH.length) % ARCH.length;
+    const A = ARCH[arch];
+    P.arch = arch;
+    P.lead = A.lead * (0.86 + rng() * 0.28);
+    P.crouchBias = A.crouch[0] + rng() * A.crouch[1];
+    P.leanOut = A.lean + (rng() * 2 - 1) * 0.10;
+    // Clamped, because `width` and `widthMul` multiply: the raw product spans
+    // 0.39-2.35 and the hip splay it drives is (0.055 + 0.16*crouch + 0.115*fight)
+    // radians per unit, so an unclamped 2.35 puts a fully crouched man's thighs
+    // 45 degrees apart — a squat, not a fighting stance. 1.75 caps that at 33.
+    P.width = clamp(P.width * A.widthMul, 0.45, 1.75);
+    P.pitchBias = A.pitch + (rng() * 2 - 1) * 0.035;
+    /** Per-leg knee-break asymmetry: nobody breaks both knees equally. */
+    P.kneeR = 0.45 + rng() * 1.25;
+    P.kneeL = 0.45 + rng() * 1.25;
     this.persona = P;
 
     /** Written by the Combatant every tick. */
@@ -253,8 +337,18 @@ export class SoldierAnim {
     this.time += dt;
 
     const reloading = I.reloadT >= 0;
-    const c = S.crouch;
+    const P = this.persona;
     const runBlend = clamp((S.speed - 2.3) / 2.4, 0, 1);
+    /**
+     * A man's own resting depth, folded into the crouch the brain asked for. This
+     * is what makes archetype 1 a permanently low fighter and archetype 0 an
+     * upright one; because it enters as `c`, every consequence — hip height, both
+     * knee solves, the spine pitch, where the weapon ends up — follows from it,
+     * which is why it changes the silhouette instead of nudging it. Only while he
+     * is up and engaging: a man walking is a man walking.
+     */
+    const c = clamp(S.crouch + (1 - S.crouch) * P.crouchBias * S.aim
+      * (1 - clamp(S.speed / 1.2, 0, 1)), 0, 1);
 
     /* ---- locomotion ------------------------------------------------------ */
     const stride = lerp(1.42, 2.55, runBlend) * lerp(1, 0.72, c);
@@ -269,8 +363,6 @@ export class SoldierAnim {
     const p1 = (this.phase + 0.5) % 1;
     const R = this._leg(this._legs[0], p0, amp, kneeStance, kneeSwing, duty);
     const L = this._leg(this._legs[1], p1, amp, kneeStance, kneeSwing, duty);
-
-    const P = this.persona;
 
     // Idle: shift weight from leg to leg and settle onto one hip. The persona
     // bias means a man at rest has a *preferred* hip rather than oscillating
@@ -295,9 +387,11 @@ export class SoldierAnim {
     for (const [leg, sg] of [[R, 1], [L, -1]]) {
       leg.thigh += crouchThigh + (1 - moving) * (0.035 + shift * sg * 0.045);
       leg.knee += crouchKnee - (1 - moving) * (0.09 + shift * sg * 0.075);
-      // sg = +1 is the right (firing-side) leg: it trails. The left leads.
-      leg.thigh += fight * (sg > 0 ? -0.17 : 0.24) * P.blade;
-      leg.knee -= fight * (sg > 0 ? 0.09 : 0.15);
+      // sg = +1 is the right (firing-side) leg: it trails, the left leads — except
+      // for archetype 2, where P.lead is negative and the stagger mirrors, so that
+      // man stands in a visibly different footprint rather than a wider one.
+      leg.thigh += fight * (sg > 0 ? -0.17 : 0.24) * P.blade * P.lead;
+      leg.knee -= fight * (sg > 0 ? 0.09 * P.kneeR : 0.15 * P.kneeL);
       if (standing) { leg.planted = true; leg.push = 0; }
       this._solveAnkle(leg);
     }
@@ -330,7 +424,16 @@ export class SoldierAnim {
      * Cheap to verify: knee = acos((sink-corrected h - T*cos(thigh)) / C), so a
      * 30 mm sink on T=0.445 C=0.425 is 20 deg and 80 mm is 36 deg.
      */
-    const sink = (0.028 + 0.055 * fight * P.drop) * (1 - c * 0.55);
+    /**
+     * Raised from 0.028 + 0.055. The harness measured the result of the old
+     * numbers on the rendered pose: one staged man came back with a trailing knee
+     * at 1 degree — locked dead straight — and the rest sat at 31/49. A rifleman
+     * driving into recoil carries his hips a good deal lower than that, and the
+     * lower bound matters more than the average, because a single locked leg is
+     * what reads as a shop mannequin. 0.040 + 0.075 puts the shallowest man near
+     * 22 degrees and the deepest past 45.
+     */
+    const sink = (0.040 + 0.075 * fight * P.drop) * (1 - c * 0.55);
     // The floor is a sanity rail, not a stance dial: a fully crouched man's hip
     // sits at ~0.43 above his ankle, so anything at or above that would silently
     // cancel the crouch.
@@ -419,8 +522,8 @@ export class SoldierAnim {
     rot[B.thighL * 3 + 2] = splayL;
     // Toes follow the stance rather than the hips: lead foot square to the
     // threat, trailing foot turned out.
-    rot[B.thighR * 3 + 1] = 0.20 * fight * P.toe;
-    rot[B.thighL * 3 + 1] = -0.07 * fight * P.toe;
+    rot[B.thighR * 3 + 1] = 0.20 * fight * P.toe * P.lead;
+    rot[B.thighL * 3 + 1] = -0.07 * fight * P.toe * P.lead;
     // _solveAnkle levels the sole fore-and-aft; the splay above rolls it
     // sideways, so cancel that at the ankle too or the boots stand on their
     // inside edges. Yaw needs no correction — turning a foot does not tilt it.
@@ -467,11 +570,20 @@ export class SoldierAnim {
     // Persona pitch/lean: one man stands square and upright, the next carries a
     // rolled shoulder and a slight forward crouch. Applied to the trunk rather
     // than the head so it survives the aim solve.
-    rot[B.spine * 3] = -0.05 + P.slouch * 0.030 + breath * 0.016 + lerp(0.0, 0.10, runBlend) * moving;
+    // `pitchBias` is the archetype's trunk attitude: one man folded over the
+    // weapon, the next standing tall behind it. It scales with `fight` so it is a
+    // fighting posture rather than a permanent hunch.
+    rot[B.spine * 3] = -0.05 + P.slouch * 0.030 + breath * 0.016 + lerp(0.0, 0.10, runBlend) * moving
+      + P.pitchBias * fight * 0.55;
     rot[B.chest * 3] = -0.06 + P.slouch * 0.026 - pitch * 0.22 * S.aim + breath * 0.022
-      + lerp(0, 0.12, runBlend) * moving;
-    rot[B.chest * 3 + 2] = -Math.sin(p0 * Math.PI * 2) * 0.05 * moving + P.lean * 0.042 * (1 - moving);
-    rot[B.spine * 3 + 2] = Math.sin(p0 * Math.PI * 2) * 0.03 * moving + P.lean * 0.026 * (1 - moving);
+      + lerp(0, 0.12, runBlend) * moving + P.pitchBias * fight * 0.85;
+    // `leanOut` is the archetype term: a trunk rolled off vertical, the posture of
+    // a man working the edge of cover rather than standing square behind it. It
+    // scales with `fight` so it only appears when he is up and engaging.
+    rot[B.chest * 3 + 2] = -Math.sin(p0 * Math.PI * 2) * 0.05 * moving
+      + P.lean * 0.042 * (1 - moving) + P.leanOut * fight * 0.62;
+    rot[B.spine * 3 + 2] = Math.sin(p0 * Math.PI * 2) * 0.03 * moving
+      + P.lean * 0.026 * (1 - moving) + P.leanOut * fight * 0.38;
 
     // Head tracks the target independently of the torso, with a lazy scan when
     // idle. The persona bias is a small permanent offset off the aim line —

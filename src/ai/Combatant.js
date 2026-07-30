@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { AI, makeRng } from './AIConfig.js';
-import { B, BIND, HITBOXES, buildSkeletonBones } from './soldier/SoldierRig.js';
+import { B, BIND, HITBOXES, RIG, buildSkeletonBones } from './soldier/SoldierRig.js';
 import { MATERIAL_ORDER } from './soldier/SoldierMaterials.js';
 import { SoldierAnim } from './soldier/SoldierAnim.js';
 import { Ragdoll } from './soldier/Ragdoll.js';
@@ -23,6 +23,10 @@ const _m = new THREE.Matrix4();
 const _up = new THREE.Vector3(0, 1, 0);
 const _down = new THREE.Vector3(0, -1, 0);
 const _flash = new THREE.Vector3();
+const _eject = new THREE.Vector3();
+const _ejectDir = new THREE.Vector3();
+const _ejectV = new THREE.Vector3();
+const _qh = new THREE.Quaternion();
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 const lerp = (a, b, t) => a + (b - a) * t;
 
@@ -55,16 +59,18 @@ export class Combatant {
       if (!geo) continue;
       const mesh = new THREE.SkinnedMesh(geo, materials[family]);
       /**
-       * Only the two families that carry the body's outline cast: 'fatigue' is
-       * the limbs and trunk, 'gear' the helmet, carrier, pouches and boots.
-       *
-       * 'visor' is 800 triangles of lens that contributes nothing to a
-       * silhouette. 'steel' is the rifle and its rails — a pencil-thin line in
-       * a shadow, and the only thing it adds is a third draw call in every
-       * cascade of every shadowed body. Dropping both takes the squad from
-       * three shadow draws per cascade to two.
+       * THE RIFLE CASTS. This used to exclude 'steel' to save a shadow draw call
+       * per cascade, on the reasoning that a carbine is "a pencil-thin line in a
+       * shadow". The review disagreed, in the only terms that matter: the dusk
+       * figure "casts a wall shadow but with no limb or rifle definition". Of
+       * course it has no rifle definition — the rifle was not in the shadow pass.
+       * A shadow that shows a man's outline with no weapon in it is worse than no
+       * shadow, because it reads as a statue rather than as a shooter, and the
+       * 0.9 m carbine held across the chest is the single most identifying part of
+       * the silhouette. 'visor' still does not cast: it is 800 triangles of lens
+       * entirely inside the helmet's own shadow.
        */
-      mesh.castShadow = family === 'fatigue' || family === 'gear';
+      mesh.castShadow = family === 'fatigue' || family === 'gear' || family === 'steel';
       if (mesh.castShadow) this.shadowMeshes.push(mesh);
       mesh.receiveShadow = true;
       mesh.frustumCulled = true;
@@ -74,13 +80,35 @@ export class Combatant {
       this.meshes.push(mesh);
     }
 
-    this.anim = new SoldierAnim(this.bones, this.rng);
+    // `seed` is the man's 1-based spawn ordinal (see EnemyAI._spawn); it selects
+    // his posture archetype by round-robin so the squad covers all five.
+    this.anim = new SoldierAnim(this.bones, this.rng, (seed | 0) - 1);
     this.ragdoll = new Ragdoll();
 
     /* ---- state ------------------------------------------------------- */
     this.pos = new THREE.Vector3().copy(spawn);
     this.vel = new THREE.Vector3();
     this.yaw = this.rng() * Math.PI * 2;
+    /**
+     * HOW FAR OFF THE AIM LINE THIS PARTICULAR MAN STANDS.
+     *
+     * `AI.bladeAngle` was applied as a single shared constant in the yaw solve
+     * below, so every engaged combatant in the squad squared up to the threat at
+     * exactly the same angle. That is the mechanical cause of the review's "all
+     * squared to camera": nine men computing the same bearing to the same player
+     * and adding the same 20 degrees arrive at nine identical facings, and no
+     * amount of per-man posture variation inside the animation can rescue it,
+     * because the whole body is being rotated to the same number.
+     *
+     * A real fire team does not agree on a stance. One man stands almost square
+     * behind his cover, the next is bladed 40 degrees with his support shoulder
+     * forward. Drawn once per man from his own deterministic rng, so a freeze
+     * frame stays reproducible for the shoot rig. The rifle still ends up on the
+     * target whatever this is — SoldierAnim twists the torso by the difference
+     * and solves the arms onto the bore — so this buys silhouette variety for
+     * free, without any man aiming somewhere he is not shooting.
+     */
+    this.bladeBias = AI.bladeAngle + (this.rng() * 2 - 1) * AI.bladeSpread;
     this.health = AI.maxHealth;
     this.ammo = AI.magSize;
     this.state = STATE.IDLE;
@@ -132,6 +160,8 @@ export class Combatant {
     this.coverCd = 0;
     this.speed = 0;
     this.mustCrouch = false;
+    /** Shoot-rig only: hold a full kneel while engaging. See EnemyAI._stagePose. */
+    this.stageKneel = false;
     this.navNode = -1;
     this._animAcc = 0;
     this._corpseSettled = false;
@@ -777,7 +807,39 @@ export class Combatant {
     if (particles) {
       particles.spawn('muzzle', { position: muzzle, direction: _v2, scale: 0.85 });
       particles.spawn('tracer', { position: muzzle, direction: _v2, scale: 1.0, colour: 0xffc070 });
-      particles.spawn('shell', { position: muzzle, direction: _v2, scale: 0.6 });
+      /**
+       * BRASS LEAVES THE EJECTION PORT, SIDEWAYS. It used to be spawned at the
+       * MUZZLE travelling along the bullet's own direction, which is why the
+       * review has reported casings "hanging 30 m downrange" for several rounds
+       * running: a case given the round's velocity vector flies to whatever the
+       * man is shooting at. A real case is thrown out of a port on the right of
+       * the receiver, up and slightly back, and is on the floor beside his boot a
+       * second later. Both the origin and the direction were wrong; the size is
+       * the particle system's own (see the note in the report).
+       */
+      _eject.copy(RIG.ejectLocal).applyMatrix4(this.bones[B.handR].matrixWorld);
+      this.bones[B.handR].getWorldQuaternion(_qh);
+      /**
+       * The velocity has to be passed as vx/vy/vz, not as `direction`: Effects.shell
+       * reads `o.vx ?? 2.7, o.vy ?? -2.6, o.vz ?? 0.4` and ignores `direction`
+       * entirely, so a direction-only call left every man in the squad throwing
+       * brass along the same fixed WORLD axis regardless of which way he was
+       * facing. Built from the weapon's own right and rear axes so the case leaves
+       * the port the way it does on the man's own flank, and biased downward — the
+       * particle agent's note on this effect explains why brass must arc down and
+       * out rather than up: a case that crests the eye plane is read against the
+       * horizon and appears to be metres long.
+       */
+      _ejectDir.set(1, 0, 0).applyQuaternion(_qh);            // weapon right
+      _ejectV.copy(_ejectDir).multiplyScalar(2.55);
+      _ejectDir.set(0, 0, 1).applyQuaternion(_qh);            // weapon rear
+      _ejectV.addScaledVector(_ejectDir, 0.55);
+      _ejectV.y -= 1.15;
+      particles.spawn('shell', {
+        position: _eject, direction: _ejectDir, scale: 0.6,
+        vx: _ejectV.x, vy: _ejectV.y, vz: _ejectV.z,
+        floorY: this.groundY,
+      });
     }
     const audio = ctx.get('audio');
     if (audio) audio.play('fire_ar', { position: muzzle, volume: 0.9, pitch: 0.94 });
@@ -844,9 +906,9 @@ export class Combatant {
     const engaged = this.alerted && this.lastSeenAge < AI.memoryTime;
     if (engaged) {
       _v1.copy(this.lastSeen).sub(this.pos);
-      // Bladed stance: stand ~20 deg off the aim line so the support arm can
-      // actually reach the handguard, the way a rifleman really squares up.
-      wantYaw = Math.atan2(-_v1.x, -_v1.z) + AI.bladeAngle;
+      // Bladed stance, at THIS man's own angle — see this.bladeBias. A shared
+      // constant here is what made the squad read as one pose repeated.
+      wantYaw = Math.atan2(-_v1.x, -_v1.z) + this.bladeBias;
     } else if (this.speed > 0.4) {
       wantYaw = Math.atan2(-this.vel.x, -this.vel.z);
     }
@@ -892,8 +954,25 @@ export class Combatant {
     const engaged = this.alerted && this.lastSeenAge < AI.memoryTime;
     const st = this.state;
     anim.in.speed = this.speed ?? 0;
-    anim.in.crouch = (st === STATE.SUPPRESSED || (this.mustCrouch && st === STATE.COVER)) ? 1
-      : (st === STATE.COVER ? 0.7 : (st === STATE.PEEK && this.mustCrouch ? 0.35 : 0));
+    // `stageKneel` is the shoot rig's "firing from a genuine kneel" — a full
+    // crouch while still up and engaging, which a crouched PEEK otherwise only
+    // gets 0.35 of. See EnemyAI._stagePose.
+    /**
+     * The kneel depth is PER MAN, not a constant 0.92.
+     *
+     * A constant was measurably self-defeating: a full kneel pins both knees near
+     * maximum flexion, so it erases the very stance differences the archetypes
+     * exist to create. The harness caught it — two men in different archetypes came
+     * back at 127 and 129 degrees of knee flexion and a mean joint separation of
+     * 0.098 rad, right on the clone threshold, because the role had overridden the
+     * posture. Keying the depth to the man's own `drop` spreads kneeling men across
+     * 0.72-0.98 of a full crouch, which is a visible difference in hip height and a
+     * measurable one in the pose signature.
+     */
+    anim.in.crouch = this.stageKneel
+      ? 0.72 + 0.26 * clamp((this.anim.persona.drop - 0.45) / 1.35, 0, 1)
+      : (st === STATE.SUPPRESSED || (this.mustCrouch && st === STATE.COVER)) ? 1
+        : (st === STATE.COVER ? 0.7 : (st === STATE.PEEK && this.mustCrouch ? 0.35 : 0));
     anim.in.aim = st === STATE.PEEK ? 1
       : st === STATE.RELOAD ? 0.25
         : st === STATE.SUPPRESSED ? 0.15

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { chamferBox, corrugated, cyl, tube, gratingPanel, rng } from './GeoKit.js';
 import {
-  wall, cladding, windowUnit, doorUnit, shutter, slab, pillar,
+  wall, cladding, windowUnit, doorUnit, shutter, slab, landing, pillar,
   stair, railingRun, catwalk, pipeRun, truss, coping, ladder,
 } from './Modules.js';
 import { L } from './Compound.js';
@@ -308,15 +308,50 @@ export function buildWestHall(b, w) {
       b.box('metal_painted', px, floor + 2.54, pz, 0.26, 5.07, 0.26, { zone: zi, bevel: 0.02, seg: 3 });
     }
   }
+  // TRAVERSAL: the east edge railing used to run the mezzanine's full length,
+  // including straight across the head of its own access stair — so the flight
+  // climbed 5.07 m into a handrail. It now stops 3.6 m short and a landing
+  // bridges the 0.55 m of open air between the top tread and the deck edge.
   railingRun(b, {
-    from: new THREE.Vector3(mez.x1, mez.y + 0.17, mez.z0), to: new THREE.Vector3(mez.x1, mez.y + 0.17, mez.z1), zone: zi,
+    from: new THREE.Vector3(mez.x1, mez.y + 0.17, mez.z0),
+    to: new THREE.Vector3(mez.x1, mez.y + 0.17, mez.z0 + 9.2), zone: zi,
+  });
+  railingRun(b, {
+    from: new THREE.Vector3(mez.x1, mez.y + 0.17, mez.z0 + 12.4),
+    to: new THREE.Vector3(mez.x1, mez.y + 0.17, mez.z1), zone: zi,
   });
   railingRun(b, {
     from: new THREE.Vector3(mez.x0, mez.y + 0.17, mez.z0), to: new THREE.Vector3(mez.x1, mez.y + 0.17, mez.z0), zone: zi,
   });
+  // TRAVERSAL: the flight used to start at z = mez.z0 - 4.6 = -4.6, which is
+  // INSIDE the inspection pit (x -30.75..-22.75, z -5.5..1.5) — it sprang off a
+  // 2.3 m void and its approach was sealed by the pit's own guard rail at
+  // z = -5.5. Measured: the player moved 0.14 m and stopped. Moved north of the
+  // pit entirely (the pit's north guard rail is at z = +1.5), onto solid floor.
+  const sx = mez.x1 + 1.3, sz0 = mez.z0 + 2.6;
   stair(b, {
-    x: mez.x1 + 1.3, y: floor, z: mez.z0 - 4.6, steps: 26, rise: 0.195, run: 0.29, width: 1.5,
+    x: sx, y: floor, z: sz0, steps: 26, rise: 0.195, run: 0.29, width: 1.5,
     dir: new THREE.Vector3(0, 0, 1), zone: zi, mat: 'metal_rusted', stringerMat: 'metal_painted',
+    railSides: [1],
+  });
+  // top of the flight is floor + 26 x 0.195 = 4.72; the mezzanine deck is
+  // mez.y + 0.17 = 4.89, so the landing sits at the stair's level and the last
+  // move onto the deck is a 0.17 m step.
+  // The landing starts exactly where the flight ends (sz0 + 26 x 0.29 = 9.54).
+  // A landing that reaches BACK over its own top treads buries them inside its
+  // slab and turns the last move into a step the controller will not take.
+  const sTop = sz0 + 26 * 0.29;
+  landing(b, {
+    x: mez.x1 + 1.05, y: mez.y - 0.10, z: sTop + 0.8,
+    w: 2.1, d: 1.6, thick: 0.2, zone: zi, mat: 'metal_rusted', fascia: 0.26,
+  });
+  railingRun(b, {
+    from: new THREE.Vector3(sx + 0.84, 4.72, sTop),
+    to: new THREE.Vector3(sx + 0.84, 4.72, sTop + 1.6), zone: zi,
+  });
+  railingRun(b, {
+    from: new THREE.Vector3(mez.x1, 4.72, sTop + 1.6),
+    to: new THREE.Vector3(sx + 0.84, 4.72, sTop + 1.6), zone: zi,
   });
 
   // ceiling services: pipe runs, cable tray, ducting
@@ -587,14 +622,21 @@ export function buildAdminBlock(b, w) {
     ], pilasterEvery: 0, apertures: ap,
   });
   slab(b, { x: x0 - 1.6, y: roof, z: tz, w: 4.2, d: 5.8, thick: 0.34, zone, mat: 'concrete' });
+  // TRAVERSAL: the ground flight used to start at lv[0] = -0.35, but the tower
+  // projects out over the east apron paving, which is laid at y = 0.00 — so its
+  // bottom two treads were buried in the ground and the player stalled 0.13 m up
+  // with nothing to step onto. The ground flight now springs off the paving and
+  // the flight above it makes up the 1.50 m difference to lv[1] in ten risers.
   for (let f = 0; f < 3; f++) {
+    const base = f === 0 ? 0.0 : lv[f];
     stair(b, {
-      x: x0 - 2.6, y: lv[f], z: tz - 2.0, steps: 10, rise: 0.185, run: 0.29, width: 1.2,
+      x: x0 - 2.6, y: base, z: tz - 2.0, steps: 10, rise: 0.185, run: 0.29, width: 1.2,
       dir: new THREE.Vector3(0, 0, 1), zone: zi, mat: 'concrete', railSides: [-1],
     });
     if (f < 2) {
       stair(b, {
-        x: x0 - 0.6, y: lv[f] + 1.85, z: tz + 2.0, steps: 10, rise: 0.185, run: 0.29, width: 1.2,
+        x: x0 - 0.6, y: base + 1.85, z: tz + 2.0, steps: 10,
+        rise: (lv[f + 1] - base - 1.85) / 10, run: 0.29, width: 1.2,
         dir: new THREE.Vector3(0, 0, -1), zone: zi, mat: 'concrete', railSides: [1],
       });
     }

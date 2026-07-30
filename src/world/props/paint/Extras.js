@@ -401,5 +401,238 @@ export function buildDecalAtlas(T, size = 1024) {
     g.globalCompositeOperation = 'source-over';
   });
 
+  /* =======================================================================
+   * SIX MORE AUTHORED MARKS, added for the surface-story pass.
+   *
+   * The ten cells above are all WEATHER — stains, dust, wear. A reviewer
+   * looking at the round-10 floor asked specifically for INCIDENT: things that
+   * happened to this floor and left a record. Weather has no edges and no
+   * scale; incident does, and an edge with a known real-world size is what
+   * lets the eye measure a slab it would otherwise read as a plane.
+   * ===================================================================== */
+
+  /*
+   * --- spalled concrete, exposed aggregate [2,1]
+   * The cement skin has broken off and the stone underneath is showing. The
+   * only mark in the set with a HARD boundary on part of its perimeter, which
+   * is exactly why it is worth having: every other mark feathers to nothing.
+   */
+  cell(2, 1, () => {
+    // the broken pocket: an irregular polygon, darker than the slab
+    g.beginPath();
+    const N = 13;
+    const pts = [];
+    for (let i = 0; i < N; i++) {
+      const a = (i / N) * Math.PI * 2;
+      const r = cs * (0.20 + rng.range(0, 0.16));
+      pts.push([cs * 0.5 + Math.cos(a) * r, cs * 0.5 + Math.sin(a) * r * 0.86]);
+    }
+    g.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < N; i++) g.lineTo(pts[i][0], pts[i][1]);
+    g.closePath();
+    g.fillStyle = 'rgba(96,90,80,0.62)';
+    g.fill();
+    // aggregate: rounded stones, lighter than the pocket, some catching light
+    g.save();
+    g.clip();
+    for (let i = 0; i < 150; i++) {
+      const px = cs * rng.next(), py = cs * rng.next();
+      const rr = cs * rng.range(0.008, 0.028);
+      const pale = rng.bool(0.55);
+      g.fillStyle = pale
+        ? `rgba(206,199,182,${rng.range(0.35, 0.75)})`
+        : `rgba(70,62,52,${rng.range(0.3, 0.7)})`;
+      g.beginPath();
+      g.ellipse(px, py, rr, rr * rng.range(0.6, 1.0), rng.range(0, 3.14), 0, Math.PI * 2);
+      g.fill();
+    }
+    g.restore();
+    // a bright lip on the top edge of the break — the fresh fracture face
+    g.strokeStyle = 'rgba(224,218,202,0.44)';
+    g.lineWidth = cs * 0.012;
+    g.beginPath();
+    g.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < 6; i++) g.lineTo(pts[i][0], pts[i][1]);
+    g.stroke();
+  });
+
+  /*
+   * --- cast drain cover [3,1]
+   * A real fixture, and the one thing in the set with man-made straight lines.
+   * A slab with a drain in it is a floor; a slab without one is a plane.
+   */
+  cell(3, 1, () => {
+    const c0 = cs * 0.5, R = cs * 0.34;
+    // rust halo bleeding out of the frame into the concrete
+    const halo = g.createRadialGradient(c0, c0, R * 0.92, c0, c0, R * 1.5);
+    halo.addColorStop(0, 'rgba(118,66,32,0.34)');
+    halo.addColorStop(1, 'rgba(118,66,32,0)');
+    g.fillStyle = halo;
+    g.fillRect(0, 0, cs, cs);
+    // frame
+    g.fillStyle = 'rgba(58,52,46,0.88)';
+    g.beginPath(); g.arc(c0, c0, R, 0, Math.PI * 2); g.fill();
+    g.fillStyle = 'rgba(36,32,28,0.92)';
+    g.beginPath(); g.arc(c0, c0, R * 0.84, 0, Math.PI * 2); g.fill();
+    // slot bars
+    for (let i = -3; i <= 3; i++) {
+      const y = c0 + i * R * 0.22;
+      g.fillStyle = `rgba(12,11,10,${0.86 - Math.abs(i) * 0.04})`;
+      const half = Math.sqrt(Math.max(0, (R * 0.80) ** 2 - (y - c0) ** 2));
+      g.fillRect(c0 - half, y - R * 0.075, half * 2, R * 0.15);
+    }
+    // worn metal highlight on the upstream rim
+    g.strokeStyle = 'rgba(188,182,170,0.36)';
+    g.lineWidth = cs * 0.010;
+    g.beginPath(); g.arc(c0, c0, R * 0.92, Math.PI * 0.9, Math.PI * 1.9); g.stroke();
+  });
+
+  /*
+   * --- hazard chevrons, mostly worn off [0,0]
+   * Painted markings are the loudest authored mark available and the easiest to
+   * overdo. This one is scrubbed back to about a third of its coverage, and the
+   * remaining paint is chalked rather than saturated.
+   */
+  cell(0, 0, () => {
+    g.save();
+    g.translate(cs * 0.5, cs * 0.5);
+    g.rotate(-0.72);
+    g.translate(-cs * 0.5, -cs * 0.5);
+    for (let i = -2; i < 8; i++) {
+      g.fillStyle = i % 2 === 0 ? 'rgba(214,186,86,0.55)' : 'rgba(38,35,31,0.46)';
+      g.fillRect(-cs * 0.4 + i * cs * 0.17, -cs * 0.3, cs * 0.115, cs * 1.6);
+    }
+    g.restore();
+    g.globalCompositeOperation = 'destination-out';
+    for (let i = 0; i < 130; i++) {
+      const px = cs * rng.next(), py = cs * rng.next();
+      const rr = cs * rng.range(0.03, 0.15);
+      const gg = g.createRadialGradient(px, py, 0, px, py, rr);
+      gg.addColorStop(0, `rgba(0,0,0,${rng.range(0.35, 1)})`);
+      gg.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = gg;
+      g.beginPath(); g.arc(px, py, rr, 0, Math.PI * 2); g.fill();
+    }
+    // feather the cell edge so a marking never shows its rectangle
+    const f = g.createRadialGradient(cs * 0.5, cs * 0.5, cs * 0.30, cs * 0.5, cs * 0.5, cs * 0.52);
+    f.addColorStop(0, 'rgba(0,0,0,0)');
+    f.addColorStop(1, 'rgba(0,0,0,1)');
+    g.fillStyle = f;
+    g.fillRect(0, 0, cs, cs);
+    g.globalCompositeOperation = 'source-over';
+  });
+
+  /*
+   * --- spill with a tide edge [1,0]
+   * Something was poured here and dried. A spill differs from every stain above
+   * in having a RIM that is darker than its middle — the solids strand at the
+   * edge as the liquid retreats — plus dribble tongues running downslope.
+   */
+  cell(1, 0, () => {
+    const px = cs * 0.48, py = cs * 0.5;
+    for (let lobe = 0; lobe < 3; lobe++) {
+      const lx = px + cs * rng.jit(0.11), ly = py + cs * rng.jit(0.11);
+      const rr = cs * rng.range(0.20, 0.34);
+      const gg = g.createRadialGradient(lx, ly, rr * 0.2, lx, ly, rr);
+      gg.addColorStop(0, 'rgba(96,88,66,0.20)');
+      gg.addColorStop(0.78, 'rgba(84,76,56,0.26)');
+      gg.addColorStop(0.93, 'rgba(52,44,30,0.52)');
+      gg.addColorStop(1, 'rgba(52,44,30,0)');
+      g.fillStyle = gg;
+      g.save();
+      g.translate(lx, ly); g.rotate(rng.range(0, 3.14)); g.scale(1, rng.range(0.62, 0.92));
+      g.translate(-lx, -ly);
+      g.beginPath(); g.arc(lx, ly, rr, 0, Math.PI * 2); g.fill();
+      g.restore();
+    }
+    // dribble tongues leaving the pool
+    for (let i = 0; i < 7; i++) {
+      const a = rng.range(0, Math.PI * 2);
+      const len = cs * rng.range(0.10, 0.26);
+      g.strokeStyle = `rgba(60,52,38,${rng.range(0.18, 0.38)})`;
+      g.lineWidth = cs * rng.range(0.010, 0.030);
+      g.beginPath();
+      g.moveTo(px + Math.cos(a) * cs * 0.24, py + Math.sin(a) * cs * 0.20);
+      g.lineTo(px + Math.cos(a) * (cs * 0.24 + len), py + Math.sin(a) * (cs * 0.20 + len));
+      g.stroke();
+    }
+  });
+
+  /*
+   * --- rust bleed off a fixing [2,0]
+   * A bolt, a base plate or a rebar end has been weeping into the concrete. The
+   * fan runs one way from a small dark source, which gives it a DIRECTION —
+   * almost nothing else on this floor has one.
+   */
+  cell(2, 0, () => {
+    const sx = cs * 0.5, sy = cs * 0.16;
+    const fan = g.createLinearGradient(0, sy, 0, cs * 0.94);
+    fan.addColorStop(0, 'rgba(128,64,26,0.46)');
+    fan.addColorStop(0.34, 'rgba(140,78,34,0.26)');
+    fan.addColorStop(1, 'rgba(146,88,42,0)');
+    g.fillStyle = fan;
+    g.beginPath();
+    g.moveTo(sx - cs * 0.06, sy);
+    g.lineTo(sx + cs * 0.06, sy);
+    g.lineTo(sx + cs * 0.30, cs * 0.94);
+    g.lineTo(sx - cs * 0.30, cs * 0.94);
+    g.closePath(); g.fill();
+    for (let i = 0; i < 22; i++) {
+      const off = cs * rng.jit(0.16);
+      g.strokeStyle = `rgba(120,58,22,${rng.range(0.10, 0.34)})`;
+      g.lineWidth = cs * rng.range(0.004, 0.016);
+      g.beginPath();
+      g.moveTo(sx + off * 0.25, sy + cs * 0.03);
+      g.quadraticCurveTo(sx + off * 0.7, cs * 0.5, sx + off, cs * rng.range(0.6, 0.95));
+      g.stroke();
+    }
+    // the source itself
+    const src = g.createRadialGradient(sx, sy, 0, sx, sy, cs * 0.075);
+    src.addColorStop(0, 'rgba(44,26,14,0.72)');
+    src.addColorStop(1, 'rgba(90,48,20,0)');
+    g.fillStyle = src;
+    g.beginPath(); g.arc(sx, sy, cs * 0.075, 0, Math.PI * 2); g.fill();
+    g.globalCompositeOperation = 'destination-out';
+    const fx = g.createLinearGradient(0, 0, cs, 0);
+    fx.addColorStop(0, 'rgba(0,0,0,1)');
+    fx.addColorStop(0.12, 'rgba(0,0,0,0)');
+    fx.addColorStop(0.88, 'rgba(0,0,0,0)');
+    fx.addColorStop(1, 'rgba(0,0,0,1)');
+    g.fillStyle = fx; g.fillRect(0, 0, cs, cs);
+    g.globalCompositeOperation = 'source-over';
+  });
+
+  /*
+   * --- angular chip field [3,0]
+   * Broken concrete chips, high contrast and hard-edged. The grit wash at [0,1]
+   * is a soft speckle for banking against kerbs; this is the near-field one,
+   * where the eye is close enough that soft speckle just reads as blur.
+   */
+  cell(3, 0, () => {
+    for (let i = 0; i < 220; i++) {
+      const px = cs * rng.next(), py = cs * rng.next();
+      const d = Math.hypot(px - cs * 0.5, py - cs * 0.5) / (cs * 0.5);
+      if (rng.next() < d * d) continue;
+      const s = cs * rng.range(0.010, 0.034);
+      const pale = rng.bool(0.5);
+      g.save();
+      g.translate(px, py);
+      g.rotate(rng.range(0, Math.PI * 2));
+      g.fillStyle = pale
+        ? `rgba(216,209,192,${rng.range(0.28, 0.62) * (1 - d * 0.6)})`
+        : `rgba(48,43,37,${rng.range(0.30, 0.66) * (1 - d * 0.6)})`;
+      g.beginPath();
+      g.moveTo(-s, -s * rng.range(0.4, 0.9));
+      g.lineTo(s * rng.range(0.5, 1.1), -s * rng.range(0.3, 0.8));
+      g.lineTo(s * rng.range(0.4, 0.9), s * rng.range(0.4, 1.0));
+      g.lineTo(-s * rng.range(0.5, 1.0), s * rng.range(0.3, 0.7));
+      g.closePath(); g.fill();
+      // a thin dark side on each chip so it reads as having thickness
+      g.fillStyle = `rgba(26,23,20,${rng.range(0.14, 0.34) * (1 - d * 0.6)})`;
+      g.fillRect(-s, s * 0.35, s * 1.8, s * 0.28);
+      g.restore();
+    }
+  });
+
   return T.colorTex(A.c, 1);
 }

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { LightCones } from './LightCones.js';
 
 /**
  * OWNER: lighting agent.
@@ -113,6 +114,24 @@ export class Practicals {
     this._wantsRig = false;
     this._grace = 0;
     this._lensMats = [];
+
+    /**
+     * Per-preset photometric trim, from the rig.
+     *
+     * `_reachMul` shrinks every fixture's windowed cutoff and `_peakMul` raises
+     * its candela. Together they trade coverage for contrast, which is the whole
+     * difference between "the yard is lit" and "there are lamps in the yard": at
+     * the authored reaches a 46 m flood and a 13 m lamp overlap across the entire
+     * play space, so the ground carries a continuous artificial wash with no gaps
+     * in it — a second flat fill, just a warm one. Pulling the reach in and the
+     * peak up puts the same light on the ground under each fixture and takes it
+     * away from between them.
+     */
+    this._reachMul = 1;
+    this._peakMul = 1;
+
+    this.cones = new LightCones(ctx);
+    this._conesBuilt = false;
   }
 
   // --- adoption --------------------------------------------------------------
@@ -137,7 +156,7 @@ export class Practicals {
 
     const peak = spec.peak > 0 ? spec.peak : Math.max(2, light.intensity);
     light.decay = 2;
-    light.distance = spec.reach;
+    light.distance = spec.reach * this._reachMul;
     // Leave `intensity` at the full-on figure for good: see _applyOne for why
     // the dimmer travels through the colour instead.
     light.intensity = peak;
@@ -146,6 +165,7 @@ export class Practicals {
     this.units.push(unit);
     this._byLight.set(light, unit);
     this._shadowsAssigned = false;
+    this._conesBuilt = false;
     this._applyOne(unit);
   }
 
@@ -191,6 +211,14 @@ export class Practicals {
     this._wantsRig = rig.practicals > 0;
     this._target = THREE.MathUtils.clamp(rig.practicals, 0, 1);
     this._dim = this._target;
+    const reach = rig.practicalReach ?? 1;
+    const peak = rig.practicalPeak ?? 1;
+    // A reach change moves every cone's geometry, so the cone rig has to be
+    // rebuilt rather than just re-dimmed.
+    if (reach !== this._reachMul) this._conesBuilt = false;
+    this._reachMul = reach;
+    this._peakMul = peak;
+    this.cones.setRig(rig.cones);
     this._apply();
   }
 
@@ -219,6 +247,11 @@ export class Practicals {
       this._apply();
     }
     if (!this._shadowsAssigned && this.units.length) this._assignShadows(camera);
+    if (!this._conesBuilt && this.units.length && this._grace >= 4) {
+      this._conesBuilt = true;
+      this.cones.build(this.units);
+    }
+    this.cones.update(this._dim, camera);
   }
 
   _apply() {
@@ -247,7 +280,14 @@ export class Practicals {
    */
   _applyOne(unit) {
     if (unit.spec.peak > 0) unit.light.intensity = unit.peak;
-    unit.light.color.copy(unit.tint).multiplyScalar(this._dim);
+    unit.light.distance = unit.spec.reach * this._reachMul;
+    // `_peakMul` rides the colour for the same reason the dimmer does: Props
+    // rewrites `intensity` every frame for its flickering wall fixtures and
+    // updates after Lighting, so anything written there is gone before the frame
+    // is drawn. `colour * intensity` is one product to the shader, and colour is
+    // a channel no other system touches. Components above 1 are fine — a
+    // THREE.Color is a plain float3 multiplier here, not a display value.
+    unit.light.color.copy(unit.tint).multiplyScalar(this._dim * this._peakMul);
   }
 
   // --- shadows ---------------------------------------------------------------
@@ -495,6 +535,7 @@ export class Practicals {
   }
 
   dispose() {
+    this.cones.dispose();
     for (const u of this.units) {
       if (u.light.shadow?.map) { u.light.shadow.map.dispose(); u.light.shadow.map = null; }
       if (u.owned) u.light.dispose();

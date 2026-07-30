@@ -75,6 +75,25 @@ export class Level {
     ];
     this.apertures = [];
     this.lightAnchors = [];
+    /**
+     * KEEP-CLEAR VOLUMES — the circulation the player must be able to walk.
+     *
+     * Every stair flight, landing and walkway in the map, as world-space AABBs
+     * that reach PLAYER.height above the walking surface. Nothing may occupy
+     * them: not level geometry, and not scattered props.
+     *
+     * This exists because the traversal suite found three separate routes
+     * blocked not by the level but by prop instances snapped onto surfaces the
+     * level had just created — a sandbag emplacement across the stair tower's
+     * head landing, a pallet stack at the foot of the dock steps, and another
+     * sandbag stack on the admin tower's bottom treads. Props is welcome to put
+     * cover ON a catwalk; it may not put it across the only way up.
+     *
+     * `tools/traversal.mjs` audits these volumes and names whatever it finds in
+     * them. Any system that scatters instances should subtract them first:
+     *     const clear = ctx.get('level')?.keepClear ?? [];
+     */
+    this.keepClear = [];
     this.bounds = new THREE.Box3(
       new THREE.Vector3(-44, -4, -28),
       new THREE.Vector3(54, 34, 62),
@@ -108,7 +127,9 @@ export class Level {
       lightAnchors: this.lightAnchors,
       spawnPoints: this.spawnPoints,
       enemySpawns: this.enemySpawns,
+      keepClear: this.keepClear,
     };
+    this._declareCirculation();
 
     // ---- surroundings first, so the horizon exists before the compound does
     buildTerrain(b, w);
@@ -190,6 +211,47 @@ export class Level {
       if (!taken) this.decor.add(light);
       this._lights.push(light);
     }
+  }
+
+  /**
+   * The walkable circulation, declared once by hand against the geometry that
+   * builds it. Each entry is the swept capsule corridor of a route: the plan
+   * footprint the player occupies, from the lowest tread to PLAYER.height above
+   * the highest one.
+   *
+   * Hand-authored rather than derived, deliberately. Deriving it from the stair
+   * calls would make it agree with the geometry by construction and therefore
+   * prove nothing; written out separately it is a second opinion, and when the
+   * two disagree the traversal suite says so.
+   */
+  _declareCirculation() {
+    const H = 1.78;
+    const put = (name, x0, x1, y0, y1, z0, z1) => this.keepClear.push({
+      name,
+      box: new THREE.Box3(new THREE.Vector3(x0, y0, z0), new THREE.Vector3(x1, y1 + H, z1)),
+    });
+    // main stair tower, x = 23.2
+    put('stair tower flight 1', 22.45, 23.95, 0.0, 2.41, 9.2, 13.1);
+    put('stair tower half landing', 22.25, 24.15, 2.40, 2.41, 13.1, 14.6);
+    put('stair tower flight 2', 22.45, 23.95, 2.40, 4.71, 14.3, 18.2);
+    put('stair tower head landing', 21.80, 24.40, 4.70, 4.71, 18.2, 20.0);
+    // catwalk ring
+    put('ring: admin bridge', 20.20, 21.80, 4.70, 4.71, 10.0, 15.9);
+    put('ring: north leg', 20.20, 21.80, 4.70, 4.71, 15.9, 28.4);
+    put('ring: west leg', 13.20, 20.20, 4.70, 4.71, 26.8, 28.4);
+    put('ring: yard leg', 9.00, 30.00, 4.70, 4.71, 1.2, 2.8);
+    // east route: dock steps, dock apron, dock fire stair
+    put('dock steps', 20.05, 22.10, 0.0, 1.21, 18.2, 19.8);
+    put('dock apron to the fire stair', 22.10, 25.60, 1.20, 1.21, 18.0, 22.0);
+    put('dock fire stair', 23.50, 24.90, 1.20, 4.71, 21.1, 26.8);
+    put('dock fire stair head', 21.80, 24.80, 4.70, 4.71, 26.8, 28.4);
+    // plant deck switchback
+    put('plant deck flight 1', 10.90, 12.30, -0.35, 2.18, -5.8, -1.6);
+    put('plant deck half landing', 11.20, 14.60, 2.17, 2.18, -7.8, -5.8);
+    put('plant deck flight 2', 13.50, 14.90, 2.17, 4.70, -6.6, -2.4);
+    put('plant deck link', 13.50, 14.90, 4.70, 4.71, -2.4, 2.0);
+    // crate climb (informal, so only the ramp and plinth are protected)
+    put('crate climb ramp', 9.30, 11.90, 0.0, 0.56, 29.1, 33.6);
   }
 
   addCollider(mesh) {

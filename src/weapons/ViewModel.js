@@ -1,9 +1,9 @@
 import * as THREE from 'three';
-import { buildWeapon, LAYOUT } from './viewmodel/Weapon.js';
+import { VIEWMODEL } from './WeaponData.js';
+import { buildWeapon } from './viewmodel/Weapon.js';
 import { buildHands } from './viewmodel/Hands.js';
 import { buildWeaponMaterials, disposeWeaponMaterials } from './viewmodel/Materials.js';
 import { MuzzleFlash } from './viewmodel/Flash.js';
-import { cylG, Mesher } from './viewmodel/Shapes.js';
 
 /**
  * OWNER: viewmodel agent. This is the single most-looked-at object in the game —
@@ -22,9 +22,13 @@ import { cylG, Mesher } from './viewmodel/Shapes.js';
  *                           recessed pockets, tagged with a curvature proxy
  *   viewmodel/Textures.js   procedural PBR bakery (albedo / normal / ORM)
  *   viewmodel/Materials.js  material zones + the edge-wear shader
- *   viewmodel/Rail.js       one-mesh Picatinny with a real cross-section
+ *   viewmodel/Rail.js       one-mesh Picatinny with a real cross-section, AND
+ *                           `buildOptic` — the 1x tube sight, its rings, turrets
+ *                           and the transmittance glass. `Weapon.js` imports the
+ *                           optic from here.
  *   viewmodel/Weapon.js     the carbine assembly
- *   viewmodel/Optic.js      open-emitter reflex sight, one glass plate, additive dot
+ *   viewmodel/Optic.js      DEAD. The older open-emitter reflex sight. Nothing
+ *                           imports it; read Rail.js for the shipping optic.
  *   viewmodel/Hands.js      gloved hands on a nested matrix skeleton
  *   viewmodel/Flash.js      four-layer additive muzzle flash + discharge light
  *
@@ -47,30 +51,26 @@ import { cylG, Mesher } from './viewmodel/Shapes.js';
  * the weapon reads as a diagonal from the bottom-right corner toward the centre.
  * That inward yaw is what makes a hipfire pose look aimed rather than parked.
  *
- * SCREEN FOOTPRINT
- *   Solved against measured screen-space extents rather than by eye. The round-6
- *   pose put the weapon's bounding box at x 1016..1434, y 678..1234 at 1080p —
- *   154 px of it below the bottom edge, with the magazine, the pistol grip and
- *   the entire firing hand outside the frame. That is what "the rifle floats
- *   detached" actually meant: the half of the weapon a hand could be holding was
- *   not being photographed.
- *
- *   This pose measures 1040..1468 x 624..1079 — the whole weapon inside the
- *   frame with the magazine floorplate just kissing the bottom edge, the muzzle
- *   at (1049, 652) and the buttpad at (1440, 871), which is a 29-degree diagonal
- *   running up and left out of the lower-right corner. Only the forearms leave
- *   the frame, which is what forearms are supposed to do.
- *
- *   Positive yaw swings the rear of the weapon toward +X and the muzzle toward
- *   -X, so a larger yaw walks the stock right while bringing the muzzle to the
- *   centre — it strengthens the diagonal and costs image area at the same time.
+ * SCREEN FOOTPRINT — solved against measured screen-space extents, not by eye.
+ *   The round-6 pose measured x 1016..1434, y 678..1234 at 1080p: 154 px below
+ *   the bottom edge, with the magazine, the pistol grip and the entire firing
+ *   hand outside the frame. That is what "the rifle floats detached" meant — the
+ *   half of the weapon a hand could be holding was not being photographed. The
+ *   carbine's pose now measures 1040..1468 x 624..1079, the whole weapon in
+ *   frame on a 29-degree diagonal out of the lower-right corner, with only the
+ *   forearms leaving it. Positive yaw walks the stock right while bringing the
+ *   muzzle to centre: it strengthens the diagonal and costs image area at once.
+ *   Per weapon, because a 358 mm SMG and a 718 mm marksman rifle cannot share
+ *   one — see `VIEWMODEL[id].pose`.
  */
-const HIP_POS = new THREE.Vector3(0.1850, -0.1790, -0.6150);
-const HIP_ROT = new THREE.Euler(0.0450, 0.2450, 0.0900, 'YXZ');
 const ADS_ROT = new THREE.Euler(0, 0, 0, 'YXZ');
 
 /**
- * How far in front of the camera the exit pupil is parked in ADS.
+ * How far in front of the camera the exit pupil is parked in ADS. Per weapon —
+ * `VIEWMODEL[id].optic.relief` — because it is a property of the SIGHT, not of
+ * the rig: the WRAITH's 20 mm dot wants the eye closer (76 mm) and the LANCET's
+ * 31 mm prism scope wants it further (90 mm). What follows is the derivation for
+ * the carbine's 82 mm, and the reasoning transfers to the other two unchanged.
  *
  * This number and the optic's own depth are the two halves of the same problem.
  * A sight 115 mm from the eye reads *small*, and the instinct when the sight
@@ -89,7 +89,17 @@ const ADS_ROT = new THREE.Euler(0, 0, 0, 'YXZ');
  * top of the receiver across the entire bottom third of the frame as one smooth
  * grey wedge. 82 mm is where both halves of the composition are right.
  */
-const ADS_EYE_RELIEF = 0.0820;
+
+/**
+ * Holster/draw dip. `WeaponSystem.state.switchProgress` runs 0 -> 0.5 over the
+ * outgoing weapon's `holsterTime` and 0.5 -> 1 over the incoming weapon's
+ * `drawTime`, so those two fields already drive this curve and there is no second
+ * timer here to fall out of step with them. At the midpoint the weapon is 24 cm
+ * below the hip pose and rolled 40 degrees muzzle-down, which is far enough out of
+ * frame that the geometry swap at `weapon:switch` — which lands exactly there —
+ * is never photographed mid-change.
+ */
+const SWITCH_DROP = 0.2400;
 
 /** Lowered carry used while sprinting. */
 const SPRINT_POS = new THREE.Vector3(0.1520, -0.2680, -0.3300);
@@ -105,6 +115,9 @@ const RELOAD_TIME = 2.15;
  */
 const INSPECT_POS = new THREE.Vector3(0.010, -0.020, -0.640);
 
+/** Desaturation target for the viewmodel fill and rim. See `_syncLights`. */
+const WHITE = new THREE.Color(1, 1, 1);
+
 export class ViewModel {
   constructor() {
     this.name = 'viewmodel';
@@ -116,7 +129,6 @@ export class ViewModel {
     this._boltT = 1;           // 1 = closed
     this._reloadT = -1;        // <0 = not reloading
     this._forced = { ads: false, firing: false };
-    this._shell = [];
     this._breath = 0;
 
     /**
@@ -126,8 +138,11 @@ export class ViewModel {
      * coupled numbers, and converging it one edit-and-reload at a time is how
      * it stayed cropped against two frame edges for six rounds.
      */
-    this.hipPos = HIP_POS.clone();
-    this.hipRot = HIP_ROT.clone();
+    this.hipPos = new THREE.Vector3();
+    this.hipRot = new THREE.Euler(0, 0, 0, 'YXZ');
+    /** Which weapon's geometry is currently built. See `_swap`. */
+    this.weaponId = null;
+    this._pendingId = null;
 
     // Scratch — update() must not allocate.
     this._pos = new THREE.Vector3();
@@ -162,23 +177,75 @@ export class ViewModel {
     if (!ctx.viewCamera.parent) ctx.viewScene.add(ctx.viewCamera);
     ctx.viewCamera.add(this.root);
 
-    const rig = buildWeapon(this.materials);
-    this.rig = rig;
-    this.root.add(rig.root);
-
+    /**
+     * The hands are built ONCE and re-parented across weapon changes, never
+     * rebuilt. They are solved against the pistol grip and the handguard section,
+     * both of which `WeaponData.VIEWMODEL` declares invariant across the loadout,
+     * so a rebuild would burn 4800 triangles of skinning work and a skeleton
+     * rebind to arrive at exactly the pose it already has — and would invalidate
+     * `_artic`, whose cached bind quaternions are the only thing keeping the
+     * solved contact pose from being overwritten every frame.
+     */
     const hands = buildHands(this.materials);
     this.hands = hands;
+
+    /**
+     * ALL THREE WEAPONS ARE BUILT HERE, ONCE, AND THE SWITCH IS A RE-PARENT.
+     *
+     * The obvious implementation is to call `buildWeapon(id)` inside the
+     * `weapon:switch` handler and dispose the outgoing rig. It works, it leaks
+     * nothing, and it is wrong: `buildWeapon` measures 43.6 ms for the carbine,
+     * 36.4 for the WRAITH and 49.3 for the LANCET on this machine, all CPU, before
+     * the driver has uploaded a single buffer. That is a three-frame hitch on a
+     * 16.7 ms budget, landing on the exact keypress the player is watching — and
+     * this project already has a worst-frame problem at 34-37 ms against a 16 ms
+     * median, so adding another spike is the one thing the brief rules out.
+     *
+     * Building all three costs ~130 ms once, inside `init`, next to a texture bake
+     * that already takes seconds, and buys a switch that allocates nothing and
+     * disposes nothing. The inactive rigs are removed from the scene graph
+     * entirely rather than merely hidden, so they cost nothing at traversal
+     * either; what they cost is about 8 MB of vertex buffers, which is the
+     * cheapest trade on offer here.
+     *
+     * tools/loadoutcheck.mjs measures the frame times across a live switch and
+     * gates the difference against an idle window, which is the assertion that
+     * would have caught the rebuild version.
+     */
+    this._rigs = {};
+    for (const id of Object.keys(VIEWMODEL)) this._rigs[id] = buildWeapon(this.materials, id);
+    const startId = VIEWMODEL[this.weapons?.current?.id] ? this.weapons.current.id : 'ar_vector';
+    const rig = this._rigs[startId];
+    this.rig = rig;
+    this.weaponId = startId;
+    this.root.add(rig.root);
     rig.root.add(hands.group);
+    this._applyProfile(rig);
 
-    this.triangles = rig.triangles + hands.triangles;
-
-    // ---- computed ADS pose --------------------------------------------------
-    this._sightLocal.copy(rig.sight.position);
-    this._adsPos.set(
-      -this._sightLocal.x,
-      -this._sightLocal.y,
-      -this._sightLocal.z - ADS_EYE_RELIEF,
-    );
+    /**
+     * Articulation set: the bones this system rotates at runtime, with their bind
+     * rotations cached so a delta is applied to the bind pose rather than
+     * replacing it.
+     *
+     * The hands are bound already wrapped (see Hands.js), so every bone's local
+     * rotation at rest is the solved contact pose, not identity. Writing
+     * `bone.rotation.x = k` would therefore throw away the solve — the one thing
+     * six rounds were spent getting right. `rotateX` on top of a restored bind
+     * quaternion is the only safe form, and the cache is what makes it restorable.
+     *
+     * Built once, here: `update` must not allocate.
+     */
+    this._artic = [];
+    const grab = (side, name, kind) => {
+      const b = hands.rigs[side]?.byName?.[name];
+      if (b) this._artic.push({ b, bind: b.quaternion.clone(), kind });
+    };
+    // Trigger finger, all three phalanges — the squeeze.
+    for (const k of ['a', 'b', 'c']) grab('right', `f0${k}`, 'trigger');
+    // The other three fingers of the firing hand tighten under recoil.
+    for (let i = 1; i < 4; i++) grab('right', `f${i}a`, 'grip');
+    // Support hand opens a little during the reload roll.
+    for (let i = 0; i < 4; i++) grab('left', `f${i}a`, 'support');
 
     // ---- muzzle flash ------------------------------------------------------
     this.flash = new MuzzleFlash(ctx.viewCamera);
@@ -197,41 +264,71 @@ export class ViewModel {
     this.vmRim = new THREE.DirectionalLight(0xbcd0e8, 0.85);
     this.vmRim.name = 'vm:rim';
     this.vmRim.position.set(-0.55, 0.62, 1.0);
-    // A dim wrap from below stops the underside going solid black.
-    this.vmBounce = new THREE.DirectionalLight(0x6a5a44, 0.30);
+    /**
+     * Warm wrap from below. Raised from 0.30 and warmed, because the hands live on
+     * the weapon's underside and far flank: this is the only light in the rig
+     * aimed at them that carries any warmth at all, and without it their entire
+     * chroma comes from a sky-coloured fill (see `_syncLights`).
+     */
+    this.vmBounce = new THREE.DirectionalLight(0x7c6446, 0.46);
     this.vmBounce.name = 'vm:bounce';
     this.vmBounce.position.set(0.2, -1, 0.35);
-    ctx.viewScene.add(this.vmKey, this.vmFill, this.vmRim, this.vmBounce);
+    /**
+     * WARM WRAP. A hemisphere light, and the last piece of the cyan fix.
+     *
+     * After the fill and rim were desaturated, the pixels still failing the hue
+     * assertion were the DARKEST ones — deep-shadow hand pixels around value 0.26
+     * lit only by the environment probe, which is a PMREM of the sky and therefore
+     * blue. Blue irradiance times a warm albedo lands neutral for exactly the
+     * reason the fill did (see `_syncLights`), and no amount of desaturating the
+     * directional lights reaches those pixels because no directional light is
+     * lighting them. A hemisphere light does: its lower half is a warm dust bounce
+     * aimed up at the underside of everything — which is where the hands are — and
+     * it is DIFFUSE ONLY, so unlike every other lever here it cannot add a grazing
+     * specular of its own. It is also what a low sun over dusty concrete does.
+     */
+    this.vmWrap = new THREE.HemisphereLight(0xa8b4c4, 0x8b6d48, 0.42);
+    this.vmWrap.name = 'vm:wrap';
+    ctx.viewScene.add(this.vmKey, this.vmFill, this.vmRim, this.vmBounce, this.vmWrap);
 
-    // ---- shell casing pool -------------------------------------------------
-    // Cases live in camera space, not weapon space: parented to the gun they
-    // would sway along with it instead of tumbling away.
-    this.shellRoot = new THREE.Group();
-    this.shellRoot.name = 'vm:shells';
-    ctx.viewCamera.add(this.shellRoot);
-    const shellGeo = this._buildShellGeometry();
-    for (let i = 0; i < 8; i++) {
-      const mesh = new THREE.Mesh(shellGeo, this.materials.brass);
-      mesh.visible = false;
-      mesh.frustumCulled = false;
-      this.shellRoot.add(mesh);
-      this._shell.push({
-        mesh, life: 0,
-        vel: new THREE.Vector3(),
-        spin: new THREE.Vector3(),
-      });
-    }
-    this._shellGeo = shellGeo;
-
-    // Sit at rest before the first frame so a frozen page is already posed.
-    this.root.position.copy(this.hipPos);
-    this.root.rotation.copy(this.hipRot);
-    this._applyPose(0, null, 0);
+    /**
+     * ---- NO SHELL CASINGS HERE. THIS SYSTEM DOES NOT EJECT BRASS. -----------
+     *
+     * A pool of eight brass MESHES used to live here, parented to `viewCamera`.
+     * The model was never wrong (39 mm, correct 5.56 case); the SCENE was.
+     * `viewScene` composites over the world with no shared depth buffer and the
+     * meshes ran `frustumCulled = false`, so a case 0.85 m from the lens drew on
+     * top of a building 47 m behind it — which reads as a metre-long object lying
+     * downrange. tools/fxcheck.mjs measured 7.03 m apparent length, 80 samples
+     * above the eye plane. And it was pure DUPLICATION: `WeaponSystem` already
+     * emits `shell:eject`, and `Particles._onShell` spawns a depth-tested
+     * billboard case in the WORLD scene that measures 0.48 m and 0 samples above
+     * the eye plane. Every shot threw two cases and one of them was broken.
+     * The fix was a deletion, not a tuning pass.
+     */
 
     ctx.bus.on('viewmodel:visible', ({ visible }) => { this.visible = visible; });
     ctx.bus.on('weapon:fire', () => this._onFire());
     ctx.bus.on('weapon:reload', () => { this._reloadT = 0; });
-    ctx.bus.on('weapon:switch', () => { this._reloadT = 0; });
+    /**
+     * THE ROOT CAUSE THIS SYSTEM SHIPPED WITH FOR SIX ROUNDS.
+     *
+     * This handler used to be `() => { this._reloadT = 0; }` and nothing else,
+     * while `buildWeapon()` ran once in `init`. Keys 1/2/3 therefore changed the
+     * name, the ammo, the RPM, the spread model and the recoil pattern — and
+     * rendered the same carbine every time. The player's report was "there is no
+     * alternative gun", for three guns that were already in the build.
+     *
+     * `WeaponSystem` emits this at the END of the holster stage, i.e. at
+     * switchProgress 0.5, which is the frame the weapon is furthest out of shot.
+     * Swapping the geometry here rather than on the keypress is what makes the
+     * change invisible; deferring it to the next `update` would put it one frame
+     * into the draw, where it is not.
+     */
+    ctx.bus.on('weapon:switch', ({ to }) => {
+      this._reloadT = 0;
+      if (to?.id) this._swap(to.id);
+    });
     ctx.bus.on('weapon:force', ({ ads, firing }) => {
       if (ads !== undefined) this._forced.ads = !!ads;
       if (firing !== undefined) this._forced.firing = !!firing;
@@ -256,31 +353,101 @@ export class ViewModel {
       this._state = q.get('vmstate');
       const ph = parseFloat(q.get('vmphase'));
       this._phase = Number.isNaN(ph) ? 0.38 : ph;
+      /**
+       * `?weapon=0|1|2` or `?weapon=smg_wraith` selects a loadout slot before the
+       * first frame, which is what lets a screenshot of the WRAITH be a screenshot
+       * and not a recording of a switch animation.
+       *
+       * It goes through `WeaponSystem` rather than swapping this system's
+       * geometry alone, so the ammo counter, the weapon name and the fire-mode
+       * readout in the HUD follow — those all read `weapons.current`, and a
+       * viewmodel-only override would have produced screenshots of a WRAITH
+       * labelled VK-7. `_applySlot` is the only entry point that system exposes
+       * for an instant change; a `weapon:select` event on the bus would be the
+       * cleaner seam and is noted as a request to the weapons agent.
+       */
+      const wq = q.get('weapon');
+      if (wq !== null && this.weapons) {
+        const order = this.weapons.slots.map((s) => s.id);
+        const i = /^\d+$/.test(wq) ? +wq : order.indexOf(wq);
+        if (i >= 0 && i < order.length && this.weapons._applySlot) {
+          this.weapons._applySlot(i);
+          this.weapons.state.slot = i;
+          this._swap(this.weapons.current.id);
+        }
+      }
     }
-  }
 
-  /** A 5.56 case: rim, tapered body, shoulder, neck. */
-  _buildShellGeometry() {
-    const m = new Mesher();
-    m.use('brass');
-    cylG(m, { z: 0.0000, r0: 0.0049, len: 0.0016, seg: 10, c: 0.0003 });
-    cylG(m, { z: 0.0125, r0: 0.0046, r1: 0.0042, len: 0.0240, seg: 10, c: 0.0004 });
-    cylG(m, { z: 0.0272, r0: 0.0042, r1: 0.0030, len: 0.0056, seg: 10, c: 0.0003 });
-    cylG(m, { z: 0.0328, r0: 0.0030, len: 0.0060, seg: 10, c: 0.0003, capB: false });
-    const geos = m.geometries();
-    const geo = geos.get('brass');
-    geo.translate(0, 0, -0.0180);
-    return geo;
+    // Sit at rest before the first frame so a frozen page is already posed.
+    this._applyPose(0, null, 0);
   }
 
   // -------------------------------------------------------------------------
+
+  /**
+   * Adopt a rig's weapon profile: hip pose, and the ADS pose computed from that
+   * weapon's own sight anchor and eye relief.
+   *
+   * The ADS pose is DERIVED, never authored — `adsPos = -sightLocal - (0,0,relief)`
+   * — which is what makes the reticle land on the view axis for a 20 mm dot, a
+   * 24 mm dot and a 31 mm prism scope from one expression. Hand-tuning three
+   * offsets is how three weapons end up with two of them subtly off-centre.
+   */
+  _applyProfile(rig) {
+    const P = VIEWMODEL[rig.id] ?? VIEWMODEL.ar_vector;
+    this.hipPos.fromArray(P.pose.hip);
+    this.hipRot.set(P.pose.rot[0], P.pose.rot[1], P.pose.rot[2], 'YXZ');
+    this._sightLocal.copy(rig.sight.position);
+    this._adsPos.set(
+      -this._sightLocal.x,
+      -this._sightLocal.y,
+      -this._sightLocal.z - P.optic.relief,
+    );
+    this.triangles = rig.triangles + (this.hands?.triangles ?? 0);
+  }
+
+  /**
+   * Put a different weapon in the player's hands. Four object references and a
+   * re-parent — no geometry is built, uploaded, disposed or allocated, which is
+   * the whole reason all three rigs exist before this is ever called.
+   *
+   * The hands move across rather than being rebuilt: they are solved against the
+   * pistol grip and the handguard section, both declared invariant across the
+   * loadout, so the pose they already hold is the pose they should hold on the
+   * incoming weapon. `_artic`'s cached bind quaternions therefore stay valid too.
+   */
+  _swap(id) {
+    const rig = this._rigs?.[id];
+    if (!rig || rig === this.rig) return;
+    rig.root.add(this.hands.group);
+    this.root.add(rig.root);
+    this.rig.root.removeFromParent();
+    this.rig = rig;
+    this.weaponId = id;
+    this._applyProfile(rig);
+    this._boltT = 1;
+  }
+
+  /**
+   * Materials and textures are SHARED and are torn down once, by `dispose`. What
+   * is per-rig — every BufferGeometry in `rig.meshes` plus the optic's four loose
+   * objects — is released here; the eyecup shade's geometry and material are
+   * chained off the lens geometry's own dispose event (Rail.js), so releasing the
+   * lens releases them too.
+   */
+  _disposeRig(rig) {
+    for (const mesh of rig.meshes) mesh.geometry.dispose();
+    rig.optic.lens.geometry.dispose();
+    rig.optic.reticle.geometry.dispose();
+    rig.optic.lensMat.dispose();
+    rig.optic.reticleMat.dispose();
+  }
 
   _onFire() {
     this._recoil = 1;
     this._recoilVel = 0;
     this._boltT = 0;
     this.flash.trigger();
-    this._ejectShell();
     // A muzzle flash is a light, not just a sprite — let the world see it.
     if (this.lighting?.flash) {
       this.rig.muzzle.updateWorldMatrix(true, false);
@@ -306,34 +473,47 @@ export class ViewModel {
     this.vmKey.intensity = 0.55 + Math.min(2.6, (sky.preset?.intensity ?? 3) * 0.55) * (0.35 + lit * 0.65);
     // Fill from the opposite side, tinted by the sky.
     this.vmFill.position.set(-this._v.x, Math.abs(this._v.y) * 0.5 + 0.5, -this._v.z).multiplyScalar(4);
+    /**
+     * THE FILL IS DESATURATED, AND THIS IS THE LARGER HALF OF THE TEAL-RING FIX.
+     *
+     * Copying the sky colour straight onto the fill and rim looks physically
+     * honest and is the reason the gloves photographed cyan for three rounds. The
+     * arithmetic at golden hour: sky #93a5c6 is linear (0.292, 0.376, 0.565) and
+     * the glove's albedo is linear (0.195, 0.152, 0.101) — red:blue 1.92,
+     * deliberately, so the hands could not read as more receiver. Multiplied:
+     *
+     *     diffuse = (0.0569, 0.0572, 0.0573)      red:blue 0.99
+     *
+     * The fill's chroma cancels the albedo's EXACTLY, so every surface lit mainly
+     * by the fill — every surface of a hand hanging under a weapon — arrives
+     * neutral, and the smallest specular then tips it green-cyan, because specular
+     * on a dielectric is not tinted by albedo. That is the mechanism, and it is
+     * why the geometry rebuild alone did not remove it.
+     *
+     * So the fill keeps the sky's hue *direction* and loses most of its
+     * saturation, the rim keeps more (a thin cool separation edge is worth
+     * having), and the warm bounce from below comes up. Doses are measured, not
+     * judged: handcheck's cyan share went 1.62% -> 0.486% at fill 0.58 / rim 0.30,
+     * so both went up one step and the fabric zones' specular ceiling came down
+     * with them. The rim needed the larger increase — the firing hand's fingertips
+     * sit on the grip's LEFT flank, facing the rim, and that is where the worst
+     * remaining pixel was.
+     */
     if (sky.skyColour) {
-      this.vmFill.color.copy(sky.skyColour);
-      this.vmRim.color.copy(sky.skyColour);
+      this.vmFill.color.copy(sky.skyColour).lerp(WHITE, 0.70);
+      this.vmRim.color.copy(sky.skyColour).lerp(WHITE, 0.48);
     }
     const amb = sky.preset?.ambient ?? 0.4;
     this.vmFill.intensity = 0.35 + amb * 0.55;
     this.vmRim.intensity = 0.45 + amb * 0.85;
-  }
-
-  _ejectShell() {
-    let s = null;
-    for (const c of this._shell) if (c.life <= 0) { s = c; break; }
-    if (!s) return;
-    s.life = 1;
-    s.mesh.visible = true;
-    // The port is in weapon space; the shell lives in camera space.
-    this._v.copy(this.rig.ejectPort).applyQuaternion(this._q2.setFromEuler(this._rot));
-    s.mesh.position.copy(this._v).add(this._pos);
-    s.mesh.quaternion.copy(this._q2);
-    // Right, up and a little forward, the way a real ejection pattern throws.
-    this._v.set(1.9 + Math.random() * 0.7, 1.15 + Math.random() * 0.5, -0.30 - Math.random() * 0.35);
-    s.vel.copy(this._v).applyQuaternion(this._q2);
-    s.spin.set(16 + Math.random() * 10, 7 + Math.random() * 5, 12 + Math.random() * 8);
+    // Sky half tracks the preset; ground half stays warm dust at every time of day,
+    // because that is what the ground under this level is.
+    this.vmWrap.color.copy(this.vmFill.color);
+    this.vmWrap.intensity = 0.20 + amb * 0.48;
   }
 
   update(dt, ctx) {
     this.root.visible = this.visible;
-    this.shellRoot.visible = this.visible;
     if (!this.visible) {
       this.flash.group.visible = false;
       return;
@@ -373,8 +553,34 @@ export class ViewModel {
     }
 
     this._applyPose(ads, pst, dt);
+    this._articulate();
     this._updateFlash(dt, ads);
-    this._updateShells(dt);
+  }
+
+  /**
+   * Deform the gloved hands on their skeletons.
+   *
+   * Amplitudes are deliberately small — 3 to 6 degrees. The point is not
+   * animation, it is that the hand is a skinned surface and therefore CAN deform:
+   * a fist that tightens by a few degrees as the weapon kicks reads as grip, and a
+   * capsule chain physically cannot do it without opening a gap at every joint.
+   * Large amplitudes would also risk walking the solved contact pose off the
+   * weapon, and that pose is the expensive thing here.
+   *
+   * Allocation-free: the bind quaternions are cached and `rotateX` writes in place.
+   */
+  _articulate() {
+    if (!this._artic.length) return;
+    const r = Math.max(0, Math.min(1, this._recoil));
+    const rel = this._reloadT >= 0
+      ? Math.sin(Math.min(1, (this._reloadT / RELOAD_TIME) * 1.6) * Math.PI)
+      : 0;
+    for (const a of this._artic) {
+      a.b.quaternion.copy(a.bind);
+      if (a.kind === 'trigger') a.b.rotateX(0.055 * r);
+      else if (a.kind === 'grip') a.b.rotateX(0.038 * r);
+      else a.b.rotateX(-0.085 * rel);
+    }
   }
 
   _applyPose(ads, pst = null, dt = 0) {
@@ -449,6 +655,26 @@ export class ViewModel {
     this._rot.z += r * 0.0230;
     this._rot.y -= r * 0.0140 * (1 - ads * 0.7);
 
+    // ---- holster / draw ----------------------------------------------------
+    /**
+     * Read straight off `WeaponSystem.state.switchProgress`, which is itself
+     * `t / holsterTime` then `t / drawTime` — so the WRAITH's 0.21 s stow and
+     * 0.34 s draw are genuinely quicker than the LANCET's 0.32 / 0.52, without a
+     * duplicate timer here that could disagree with the system deciding when the
+     * weapon may fire again. Squared on the way down and eased on the way up: a
+     * draw that arrives slower than it left is what gives the swap any weight.
+     */
+    const st2 = this.weapons?.state;
+    if (st2?.switching) {
+      const p = st2.switchProgress ?? 0;
+      const d = p < 0.5 ? (p * 2) ** 1.7 : 1 - THREE.MathUtils.smoothstep(p, 0.5, 1);
+      this._pos.y -= d * SWITCH_DROP;
+      this._pos.z += d * 0.0900;
+      this._pos.x += d * 0.0450;
+      this._rot.x -= d * 0.7000;
+      this._rot.z += d * 0.3600;
+    }
+
     // ---- reload: drop the mag, tilt the gun in -----------------------------
     if (this._reloadT >= 0) {
       const p = this._reloadT / RELOAD_TIME;
@@ -494,7 +720,7 @@ export class ViewModel {
     const k = 0.058;
     ret.uOff.value.set(
       THREE.MathUtils.clamp(this._eye.x * k, -win.w * 0.40, win.w * 0.40),
-      THREE.MathUtils.clamp((this._eye.y - LAYOUT.opticAxisY) * k, -win.h * 0.40, win.h * 0.40),
+      THREE.MathUtils.clamp((this._eye.y - rig.layout.opticAxisY) * k, -win.h * 0.40, win.h * 0.40),
     );
     ret.uInt.value = 5.4 + ads * 1.2;
   }
@@ -510,20 +736,6 @@ export class ViewModel {
     this.flash.group.scale.setScalar(1 - ads * 0.18);
   }
 
-  _updateShells(dt) {
-    if (dt <= 0) return;
-    for (const s of this._shell) {
-      if (s.life <= 0) continue;
-      s.life -= dt * 1.15;
-      if (s.life <= 0) { s.mesh.visible = false; continue; }
-      s.vel.y -= 9.8 * dt * 0.55;
-      s.mesh.position.addScaledVector(s.vel, dt);
-      s.mesh.rotateX(s.spin.x * dt);
-      s.mesh.rotateY(s.spin.y * dt);
-      s.mesh.rotateZ(s.spin.z * dt);
-    }
-  }
-
   resize(w, h, ctx) {
     // The viewmodel FOV is deliberately narrower than the world FOV so the gun
     // keeps its proportions on ultrawide displays.
@@ -533,13 +745,8 @@ export class ViewModel {
 
   dispose() {
     this.root.removeFromParent();
-    this.shellRoot.removeFromParent();
-    for (const mesh of [...this.rig.meshes, ...this.hands.meshes]) mesh.geometry.dispose();
-    this._shellGeo.dispose();
-    this.rig.optic.lens.geometry.dispose();
-    this.rig.optic.reticle.geometry.dispose();
-    this.rig.optic.lensMat.dispose();
-    this.rig.optic.reticleMat.dispose();
+    for (const id of Object.keys(this._rigs)) this._disposeRig(this._rigs[id]);
+    for (const mesh of this.hands.meshes) mesh.geometry.dispose();
     this.flash.dispose();
     disposeWeaponMaterials(this.materials, this._texSets);
   }

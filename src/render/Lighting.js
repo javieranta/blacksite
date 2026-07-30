@@ -187,7 +187,22 @@ export class Lighting {
 
     // ---- dynamic + artificial ----------------------------------------------
     this.flashes = new FlashPool(ctx, 4);
-    this.practicals = new Practicals(ctx, 5);
+    // A ceiling of eight yard masts rather than five. The level's own 21 anchors
+    // are all bolted to buildings — floods on the perimeter, wallpacks by doors,
+    // highbays inside the west hall — so the middle of the courtyard, which is
+    // where the camera stands in every night framing, has no fixture in it at
+    // all. Masts in the open ground are what make the yard read as *lit* rather
+    // than as ambiently grey, and now that the sky fill is a fifth of what it
+    // was (see LIGHT_RIGS.night) they are carrying the frame.
+    //
+    // MEASURED CAVEAT: this is a ceiling, not a count. Practicals._yardSites
+    // rejects a candidate within 11 m of a fixture the level already placed or
+    // 13 m of another mast, and on this level that clearance test still lets
+    // only five through — raising the number from 5 to 8 did not add a single
+    // mast. It is left at 8 because it is free and correct for a larger level,
+    // but the yard's readability at night comes from the fill cut and the
+    // reach/candela trim, not from this.
+    this.practicals = new Practicals(ctx, 8);
     this.portals = new AperturePortals(ctx, 4);
 
     // ---- volumetrics -------------------------------------------------------

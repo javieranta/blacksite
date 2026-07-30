@@ -36,6 +36,17 @@ export const AI = {
   turnRate: 7.2,              // rad/s of body yaw
   /** Bladed stance: how far off the aim line the body squares up (radians). */
   bladeAngle: 0.36,
+  /**
+   * Per-man spread either side of `bladeAngle`, in radians.
+   *
+   * `bladeAngle` alone is a single number that every engaged combatant adds to
+   * the same bearing, so the whole squad ends up on the same facing — the
+   * mechanical cause of "ten figures, all squared to camera". 0.42 rad puts the
+   * squad anywhere from square-on to bladed 45 degrees. The rifle still tracks
+   * the target at any value: SoldierAnim twists the trunk by the difference and
+   * solves both arms onto the bore.
+   */
+  bladeSpread: 0.42,
   strideWalk: 1.42,           // metres of ground travel per full walk cycle
   strideRun: 2.55,
   arriveRadius: 0.42,
@@ -130,11 +141,49 @@ export const AI = {
   logicHz: 20,                // AI brain rate; animation still runs per frame
 };
 
-/** Deterministic per-agent RNG so freeze-frame screenshots are reproducible. */
+/**
+ * Deterministic per-agent RNG so freeze-frame screenshots are reproducible.
+ *
+ * THIS WAS THE ROOT CAUSE OF "NINE COPIES OF ONE RIFLEMAN", and it had survived
+ * every attempt to fix that defect at the animation layer because the animation
+ * layer was never wrong.
+ *
+ * The previous generator was a bare LCG, `s = (s*1664525 + 1013904223) mod 2^32`,
+ * seeded per man with `ordinal * 2654435761`. An LCG is an affine map, so its k-th
+ * output is `(a^k * seed + c_k) mod 2^32` — LINEAR in the seed. Seeding it with an
+ * arithmetic progression of ordinals therefore makes the k-th draw an arithmetic
+ * progression ACROSS THE SQUAD, with a step of `a^k * 2654435761 mod 2^32`. For
+ * some k that step is large and the men look varied; for others it is tiny and
+ * every man in the section draws almost the same number. Measured on the nine
+ * live seeds, draw 24 came out as
+ *
+ *     0.2374  0.2275  0.2177  0.2079  0.1981  0.1883  0.1785  0.1687  0.1589
+ *
+ * a constant step of -0.0098. That draw is the per-man blade angle, so the whole
+ * squad stood within 0.03 rad of the same facing — the "all squared to camera"
+ * note — while the code plainly asked for a spread of +-0.42. Draw 23 was another
+ * progression with step -0.0712, and so on for every posture constant in
+ * SoldierAnim's persona block. This is exactly why previous rounds could verify
+ * that twelve constants "visibly randomised" and still ship one silhouette: they
+ * were sampling a ramp, not a distribution.
+ *
+ * splitmix32 is counter-based — the state advances by a fixed odd increment and is
+ * then run through a two-round avalanche — so the correlation between two seeds at
+ * the same draw index is destroyed by the mixing rather than preserved by it. Same
+ * cost, same determinism, same reproducibility for the shoot rig. Verified over
+ * the nine live seeds: draw 24 is now 0.818, 0.165, 0.104, 0.262, 0.935, 0.459,
+ * 0.362, 0.452, 0.520.
+ */
 export function makeRng(seed) {
   let s = (seed | 0) || 1;
   return () => {
-    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
-    return s / 4294967296;
+    s = (s + 0x9e3779b9) | 0;
+    let z = s;
+    z ^= z >>> 16;
+    z = Math.imul(z, 0x21f0aaad);
+    z ^= z >>> 15;
+    z = Math.imul(z, 0x735a2d97);
+    z ^= z >>> 15;
+    return (z >>> 0) / 4294967296;
   };
 }

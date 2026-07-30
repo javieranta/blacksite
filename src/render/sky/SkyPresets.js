@@ -106,13 +106,26 @@ const ART = {
     airglow: [0.00042, 0.00036, 0.00058],
   },
   overcast: {
-    exposure: 1.0, tint: [1.0, 1.0, 1.0], desaturate: 0.55,
+    // ROUND 11 — "a flat structureless grey sky". It was: `overcast: 0.90`
+    // blends ninety per cent of the dome toward one constant colour, so whatever
+    // cloud form the shader computes survives at a tenth strength and is then
+    // desaturated by more than half on top. There is nothing left to see. A real
+    // stratus deck is not featureless — it has base texture, thickness variation
+    // and a luminance gradient — it is only *low contrast*, which is a different
+    // thing and the one the eye still reads as sky rather than as backdrop.
+    //
+    // So the flat blend comes down to two thirds, the desaturation comes off,
+    // and the cloud layer is retuned to be a low overcast deck rather than a
+    // heavy cumulus field: near-total coverage, a harder edge profile so the base
+    // shows structure, more high-frequency detail, and more absorption so the
+    // thicker parts genuinely darken.
+    exposure: 1.0, tint: [1.0, 1.0, 1.0], desaturate: 0.38,
     multiScatter: 0.62, mieG: 0.84,
     extinction: 0.0038, extinctionTint: [0.96, 0.98, 1.00],
     hazeHeight: 520, mistHeight: 44, mistGain: 0.55,
     apMieStrength: 0.0, apGain: 1.00, cloudHaze: 0.045,
-    overcast: 0.90, overcastTint: [0.94, 0.96, 1.00], overcastLevel: 0.46,
-    cumulus: { coverage: 0.86, softness: 0.60, altitude: 900, scale: 1450, drift: 9.0, absorption: 1.7, detail: 0.50 },
+    overcast: 0.66, overcastTint: [0.94, 0.96, 1.00], overcastLevel: 0.50,
+    cumulus: { coverage: 0.95, softness: 0.38, altitude: 820, scale: 1780, drift: 9.0, absorption: 2.5, detail: 0.88 },
     cirrus: { coverage: 0.0, altitude: 7000, scale: 4000, drift: 18, brightness: 0.5 },
     sunDisc: 0, star: 0.0, moon: 0.0,
     airglow: [0, 0, 0],

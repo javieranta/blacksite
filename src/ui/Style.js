@@ -124,6 +124,36 @@ export const HUD_CSS = `
 #hud .bs-reload-arc { width: 210px; height: 1px; background: var(--hair-2); position: relative; overflow: hidden; }
 #hud .bs-reload-arc i { position: absolute; inset: 0 100% 0 0; background: var(--amber); }
 
+/* -------------------------------------------------------------- ordnance -- */
+/* Stacked directly above the ammunition block, same right margin and same
+   210px column, so the corner is one panel rather than two. */
+#hud .bs-ord {
+  position: absolute; right: 46px; bottom: 176px;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 7px;
+}
+#hud .bs-ord.out { opacity: .45; }
+#hud .bs-ord-cook {
+  font-size: 10px; font-weight: 700; letter-spacing: .40em; color: var(--amber);
+  text-transform: uppercase; opacity: 0;
+}
+#hud .bs-ord-cook.on { animation: bs-blink 1.1s steps(1, end) infinite; opacity: 1; }
+#hud .bs-ord-cook.crit { color: var(--red); animation-duration: .34s; }
+#hud .bs-ord-fuse { width: 210px; height: 1px; background: var(--hair-2); position: relative; overflow: hidden; opacity: 0; }
+#hud .bs-ord-fuse.on { opacity: 1; }
+#hud .bs-ord-fuse i { position: absolute; inset: 0; background: var(--amber); transform-origin: right; transform: scaleX(0); }
+#hud .bs-ord-fuse.crit i { background: var(--red); }
+#hud .bs-ord-row { display: flex; align-items: center; gap: 12px; }
+#hud .bs-ord-pips { display: flex; gap: 3px; height: 13px; }
+#hud .bs-ord-pips span {
+  width: 5px; height: 13px; background: var(--bone); opacity: .85;
+  transform: skewX(-13deg);
+  box-shadow: 0 1px 3px rgba(2,4,7,.7);
+}
+#hud .bs-ord-pips span.off { opacity: .09; box-shadow: none; }
+#hud .bs-ord-count { font-size: 15px; letter-spacing: .10em; color: var(--steel-hi); line-height: 1; }
+#hud .bs-ord-underline { width: 210px; height: 1px; background: linear-gradient(to left, var(--hair-2), rgba(0,0,0,0)); }
+#hud .bs-ord-meta { display: flex; align-items: center; gap: 10px; }
+
 /* ---------------------------------------------------------------- vitals -- */
 #hud .bs-vitals { position: absolute; left: 46px; bottom: 40px; display: flex; flex-direction: column; gap: 10px; }
 #hud .bs-armour { display: flex; gap: 3px; height: 7px; }

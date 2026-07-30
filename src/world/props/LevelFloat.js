@@ -1,64 +1,71 @@
 import * as THREE from 'three';
-import { drawTie } from './LevelTies.js';
+import { drawTie, drawStandoff } from './LevelTies.js';
+import { clusterIslands } from './LevelIslands.js';
+import { FAN, findAnchor, standoffPairs, eyeDistance } from './LevelAnchors.js';
 
 /**
  * THE WORLD FLOAT AUDIT. OWNER: props agent.
  *
  * WHY THIS EXISTS — READ THIS BEFORE WRITING ANOTHER RESEAT PASS
- *   "Rusted plates float in mid-air" was raised in four consecutive reviews and
- *   three props agents attempted it. Every one of them worked on the props
- *   system, because that is the system that owns floating-prop defects. All
- *   three fixes worked. The plates stayed.
+ *   "Rusted plates float in mid-air" has been raised in FIVE consecutive reviews
+ *   and four props agents have attempted it. Every one of them worked on the
+ *   props system, because that is the system that owns floating-prop defects, and
+ *   every one of the fixes worked. The plates stayed, because the plates are
+ *   baked LEVEL geometry and some of them are `solid: false`, so they live in
+ *   `level.decor` and are not even in the BVH snapshot the props system probes:
+ *   Placer, ContactPass, FloatSweep and Props._auditWorld cannot see them at all.
  *
- *   Round 8 identified the objects by casting a ray through the offending pixel
- *   of tools/out/shots/round7/hero-golden.png. The answer:
+ *   The two named offenders, both measured by tools/floatcheck.mjs:
+ *     hero-golden  `fg|fabric` x2 @ (5.85, 3.48, 17.84), 23.6 cm clear of
+ *                  anything. src/world/level/Foreground.js buildNearBent(), the
+ *                  two pieces commented "torn mineral-wool lagging peeling off
+ *                  the underside of the pipe", placed 0.3 m and 1.3 m clear of
+ *                  the pipe they peel off. The dimpled diamond pattern every
+ *                  reviewer called "a rusted perforated plate" is the hessian
+ *                  weave normal on the `fabric` recipe, seen edge-on.
+ *     vertical     `hall|metal_rusted` 1.44 x 2.15 x 0.68 m @ (-6.7, 5.8, 0.64),
+ *                  9.9 cm clear of the hall wall. src/world/level/Interiors.js.
  *
- *     pixel (1147,197) -> mesh `fg|fabric|110`, material `fabric`,
- *     world (6.28, 3.34, 17.87), 4.28 m from the hero camera.
- *
- *   That is `src/world/level/Foreground.js`, buildNearBent(), the line
- *   commented "torn mineral-wool lagging peeling off the underside of the pipe":
- *   a 0.62 x 0.80 x 0.03 fabric slab placed 1.4 m clear of the pipe it is
- *   supposed to be peeling off. It is LEVEL geometry, not a prop. It is also
- *   `solid: false`, so it lives in `level.decor` and is not even in
- *   `level.colliders` — which means the props system's own BVH snapshot cannot
- *   see it, ContactPass cannot see it, FloatSweep cannot see it, and
- *   Props._auditWorld cannot see it. Four rounds of props-side work could not
- *   possibly have touched it.
- *
- *   The dimpled diamond pattern that made every reviewer call it "a rusted
- *   perforated plate" is the hessian weave normal map on the `fabric` recipe,
- *   seen edge-on against a golden sky.
+ *   ROUND 9: this pass EXISTED in round 8 and still did not fix either of them.
+ *   Three separate reasons, all now addressed and all documented at the constant
+ *   or function responsible:
+ *     · MAX_DIM / DECK_SPAN excluded the vertical.png plate as "structure".
+ *     · MAX_BRACES 28 discarded 44 of the 82 floats found, by its own console line.
+ *     · _findAnchor tied the hero-golden panel to the OTHER floating lagging
+ *       piece and reported success.
+ *   And a fourth, in LevelTies.js: the ties it drew were 7.5 mm wire, which is
+ *   1.1 px wide at 4.2 m.
  *
  * WHAT THIS PASS DOES ABOUT IT
  *   Props does not own the level and will not edit it. What props CAN do is what
  *   a set-dressing pass is for: find the unsupported pieces of the world by
- *   measurement, and give them visible, physically-legible support — a wire
- *   rope, a strap cleat, a bracket — built out of props-owned geometry that is
+ *   measurement, and give them visible, physically-legible support — a strap, a
+ *   bolted eye plate, an angle bracket — built out of props-owned geometry that is
  *   sited by raycast, so it follows the level if the level moves.
  *
  *   1. CLUSTER. Every level mesh — colliders AND decor — is walked triangle by
- *      triangle in world space. Triangles are welded into clusters through a
- *      union-find over a 14 cm cell grid keyed on their vertices, so anything
- *      within ~28 cm of anything else is one object. A cluster is therefore an
- *      "island": a connected piece of world with a measurable gap around it.
- *      Large triangles keep their full AABB, so a wall is one huge cluster and
- *      is skipped as structure rather than mistaken for a floating panel.
- *   2. SUSPECT. Small (<= 2.2 m), light (<= 1200 tri), panel-or-box shaped
- *      clusters whose base is more than 80 cm off the ground and which subtend
- *      more than 18 mrad from one of the shoot rig's cameras.
- *   3. PROVE. A suspect is cleared if it is resting on something, or if the
- *      nearest OTHER surface is within a bracket's span of its real vertices.
- *      Note "real vertices": measuring from the bounding box is what made the
- *      first version of this pass report the round-7 panel as attached. Read
- *      _gap() before changing that test.
- *   4. BRACE. The nearest real surface within 2.8 m is found by a 26-direction
- *      fan, and a tie is drawn from the cluster's own nearest VERTEX — not its
- *      bounding box, which is how the round-7 viewmodel fix ended up 18 mm short
- *      — to that surface. Short spans get a bolted bracket, long spans get a
- *      pair of sagging wire ropes with cleats. Anything with nothing in reach is
- *      named and counted in the console, because props cannot invent a support
- *      that is not there and should not pretend otherwise.
+ *      triangle in world space and welded into "islands" by union-find over a
+ *      14 cm cell grid, so anything within ~28 cm of anything else is one object.
+ *      Large triangles keep their full AABB, so a wall is one huge cluster and is
+ *      skipped as structure rather than mistaken for a floating panel.
+ *   2. SUSPECT. Panel-or-box shaped clusters under MAX_DIM and MAX_TRIS whose base
+ *      is off the ground and which subtend more than MIN_ANGULAR from one of the
+ *      shoot rig's cameras.
+ *   3. PROVE. Cleared if resting on something, or if the nearest OTHER surface is
+ *      within a bracket's span of its REAL VERTICES. Measuring from the bounding
+ *      box is what made the first version of this pass report the round-7 panel as
+ *      attached at 7 cm while it had clear sky along its whole silhouette. Read
+ *      _gap() before changing that.
+ *   4. BRACE. The nearest real surface within BRACE_REACH that is not itself
+ *      floating, found by a 26-direction fan from the island's own vertices, and a
+ *      tie drawn from a real vertex to it. Anything with nothing in reach is named
+ *      and counted in the console, because props cannot invent support that is not
+ *      there and should not pretend otherwise.
+ *
+ *   VERIFY WITH: node tools/floatcheck.mjs --view vertical
+ *   That tool measures the same question from the rendered scene graph without
+ *   knowing this pass exists, which is the only reason the numbers here can be
+ *   trusted.
  *
  * Cost: one pass over ~490k world triangles plus ~50 rays per suspect. ~60 ms at
  * init, zero per frame. Draw calls: zero — every tie merges into the existing
@@ -77,35 +84,66 @@ const XZ_LIMIT = 54;
  * Largest dimension a cluster may have and still be judged as a loose object.
  * Anything bigger is a beam, a deck or a wall panel: structure the level owns,
  * which props reports and does not decorate.
+ *
+ * ROUND 9: 2.2 -> 3.4 and DECK_SPAN 1.3 -> 2.6. THIS PAIR OF CONSTANTS WAS THE
+ * BUG. The plate the round-8 review called "the clearest case" in vertical.png is
+ * `hall|metal_rusted|111`, a 1.44 x 2.15 x 0.68 m island at (-6.7, 5.8, 0.64)
+ * floating 9.9 cm clear of the hall wall behind it — measured by
+ * tools/floatcheck.mjs, which walks the same geometry without a size filter.
+ * Its middle dimension is 1.44 m, so `sorted[1] > DECK_SPAN` classified it as
+ * "a floor, roof or deck plate" and this pass never looked at it again. Four
+ * rounds of work on floating plates could not reach the plate.
+ *
+ * The gap test below is what keeps the wider band safe: a real deck resting on
+ * real beams measures a gap of zero from its own vertices and is never a
+ * suspect, whatever its span. Only genuinely isolated geometry gets this far.
  */
-const MAX_DIM = 2.2;
+const MAX_DIM = 3.4;
 /**
  * A cluster whose two LARGEST dimensions both exceed this is a floor, roof or
  * deck plate however thin it is. Bracing one with a rod looks like a mistake.
  */
-const DECK_SPAN = 1.3;
+const DECK_SPAN = 2.6;
 /** Triangles above which a cluster is machinery or structure, not a panel. */
 const MAX_TRIS = 1200;
 /** Daylight allowed under a cluster before it stops counting as "resting". */
 const REST_REACH = 0.055;
 /**
- * Isolation radius. If ANYTHING is within this of a cluster's bounding box it is
- * left alone.
+ * THREE BANDS, NOT TWO. This is the round-9 correction to the verdict.
  *
- * FloatSweep uses 0.18 m for props, which is the span of a real bracket. This is
- * deliberately three times looser, because the two passes answer different
- * questions. FloatSweep can move or delete a prop, so it can afford to be
- * strict. This pass can only ADD geometry to somebody else's level, so being
- * wrong is expensive: a wire drawn onto a panel that was fine is a new defect.
- * At 0.55 m the pass keeps its hands off anything with a plausible neighbour and
- * fires only on genuinely isolated objects — the 1.4 m case in hero-golden is
- * eight times past this line.
+ * Round 8 had one threshold: anything with a surface inside NEAR_REACH was
+ * declared "attached" and left alone, on the reasoning that a bracket spans that
+ * far so the panel is plausibly mounted. The reasoning is sound and the
+ * conclusion was wrong, because a bracket that is not DRAWN does not hold
+ * anything up. The plate the review called the clearest case sits 9.9 cm off the
+ * hall wall — inside NEAR_REACH, therefore exempt, therefore never touched — and
+ * at 6.3 m that 9.9 cm is 17 px of daylight with the new shadow pass throwing the
+ * plate's own shadow onto the wall behind it. The review's words: the shadow
+ * "proves the float".
+ *
+ *   gap <= CONTACT_GAP      touching. Nothing to do.
+ *   gap <= NEAR_REACH       plausibly a standoff-mounted panel, so props DRAWS
+ *                           the standoff: studs through the gap with a bolt head
+ *                           on the panel face and a pad on the wall.
+ *   gap >  NEAR_REACH       genuinely in mid-air. Full tie, see LevelTies.js.
  */
+const CONTACT_GAP = 0.03;
+/** Widest gap that a bolted standoff can plausibly account for. */
 const NEAR_REACH = 0.16;
+/** Standoffs drawn per panel, spread across its face. */
+const STANDOFFS = 3;
 /** How far a tie may reach for something to fasten to. */
 const BRACE_REACH = 2.8;
-/** Ties we are willing to draw. Beyond this, report instead of dressing. */
-const MAX_BRACES = 28;
+/**
+ * Ties we are willing to draw. Beyond this, report instead of dressing.
+ *
+ * ROUND 9: 28 -> 96. The round-8 console said it plainly and nobody read it:
+ * "28 FLOATING and given 54 visible tie(s) ... 44 floating and left for the
+ * level agent (tie budget 28)". Three fifths of the floats found were dropped on
+ * the floor by the budget. 96 ties is ~38k triangles in an existing merged batch
+ * and zero extra draw calls, against a level that renders 1.1M.
+ */
+const MAX_BRACES = 96;
 /** Vertices kept per suspect cluster, for choosing the attachment point. */
 const MAX_SAMPLES = 240;
 /**
@@ -118,8 +156,6 @@ const MIN_ANGULAR = 0.018;
 const MAX_THICKNESS = 0.75;
 
 const _a = new THREE.Vector3();
-const _b = new THREE.Vector3();
-const _c = new THREE.Vector3();
 const _o = new THREE.Vector3();
 const _d = new THREE.Vector3();
 const _down = new THREE.Vector3(0, -1, 0);
@@ -127,20 +163,6 @@ const _down = new THREE.Vector3(0, -1, 0);
 /** Offsets across a box face, as fractions of the face's half-extents. */
 const TAPS = [[0, 0], [0.7, 0.7], [-0.7, 0.7], [0.7, -0.7], [-0.7, -0.7]];
 
-/** The 26 directions out of a box: faces, edges and corners. */
-const FAN = (() => {
-  const out = [];
-  for (let x = -1; x <= 1; x++) {
-    for (let y = -1; y <= 1; y++) {
-      for (let z = -1; z <= 1; z++) {
-        if (!x && !y && !z) continue;
-        const l = Math.hypot(x, y, z);
-        out.push([x / l, y / l, z / l]);
-      }
-    }
-  }
-  return out;
-})();
 
 export class LevelFloatPass {
   /** @param {import('./Surfaces.js').SurfaceProbe} probe */
@@ -149,7 +171,7 @@ export class LevelFloatPass {
     this.stats = {
       meshes: 0, triangles: 0, clusters: 0, suspects: 0,
       resting: 0, attached: 0, braced: 0, unbraceable: 0, overBudget: 0, wires: 0,
-      worst: 0,
+      bolted: 0, studs: 0, worst: 0,
     };
     /** Human-readable list of what was braced and what could not be. */
     this.report = [];
@@ -225,136 +247,14 @@ export class LevelFloatPass {
 
   /* -------------------------------------------------------------- cluster */
 
-  /**
-   * Union-find over a sparse cell grid. Returns the cluster table.
-   * Cells are keyed by a single integer so the Map stays fast at 300k entries.
-   */
+  /** Weld the world into islands. See props/LevelIslands.js. */
   _cluster(meshes) {
-    const ids = new Map();
-    const parent = [];
-    const bmin = [];      // 3 per id
-    const bmax = [];      // 3 per id
-    const tris = [];
-    const sol = [];       // 1 if any collider triangle landed here
-    const fab = [];       // 1 if any fabric-surface triangle landed here
-    const pts = this._collect ? [] : null;   // triangle centroids, for PCA
-    let n = 0;
-
-    const idOf = (ix, iy, iz) => {
-      const key = (ix + 1024) + (iy + 256) * 4096 + (iz + 1024) * 4096 * 1024;
-      let id = ids.get(key);
-      if (id === undefined) {
-        id = n++;
-        ids.set(key, id);
-        parent.push(id);
-        bmin.push(Infinity, Infinity, Infinity);
-        bmax.push(-Infinity, -Infinity, -Infinity);
-        tris.push(0);
-        sol.push(0);
-        fab.push(0);
-        if (pts) pts.push(null);
-      }
-      return id;
-    };
-    const find = (a) => {
-      let r = a;
-      while (parent[r] !== r) r = parent[r];
-      while (parent[a] !== r) { const nx = parent[a]; parent[a] = r; a = nx; }
-      return r;
-    };
-    const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[rb] = ra; };
-
-    const key3 = [0, 0, 0];
-    let triTotal = 0;
-    for (const mesh of meshes) {
-      mesh.updateMatrixWorld(true);
-      // Is this mesh in the probe's BVH? That decides which isolation test the
-      // cluster is entitled to — see _isolated().
-      const inBVH = this._inProbe.has(mesh) ? 1 : 0;
-      const isFabric = this.surfaceOf(mesh) === 'fabric' ? 1 : 0;
-      const geo = mesh.geometry;
-      const pos = geo.attributes.position;
-      const idx = geo.index;
-      const count = idx ? idx.count : pos.count;
-      const m = mesh.matrixWorld;
-      for (let f = 0; f + 2 < count; f += 3) {
-        // three world vertices
-        for (let k = 0; k < 3; k++) {
-          const vi = idx ? idx.getX(f + k) : f + k;
-          const v = k === 0 ? _a : k === 1 ? _b : _c;
-          v.fromBufferAttribute(pos, vi).applyMatrix4(m);
-        }
-        const loY = Math.min(_a.y, _b.y, _c.y);
-        const hiY = Math.max(_a.y, _b.y, _c.y);
-        if (hiY < Y_MIN || loY > Y_MAX) continue;
-        const loX = Math.min(_a.x, _b.x, _c.x), hiX = Math.max(_a.x, _b.x, _c.x);
-        const loZ = Math.min(_a.z, _b.z, _c.z), hiZ = Math.max(_a.z, _b.z, _c.z);
-        if (loX > XZ_LIMIT || hiX < -XZ_LIMIT || loZ > XZ_LIMIT || hiZ < -XZ_LIMIT) continue;
-        triTotal++;
-
-        // one cell per vertex; the triangle welds them together
-        let nk = 0;
-        for (let k = 0; k < 3; k++) {
-          const v = k === 0 ? _a : k === 1 ? _b : _c;
-          const id = idOf(
-            Math.floor(v.x / CELL), Math.floor(v.y / CELL), Math.floor(v.z / CELL),
-          );
-          let dup = false;
-          for (let j = 0; j < nk; j++) if (key3[j] === id) { dup = true; break; }
-          if (!dup) key3[nk++] = id;
-        }
-        const root = key3[0];
-        for (let j = 1; j < nk; j++) union(root, key3[j]);
-
-        // the WHOLE triangle's extent belongs to the cluster, so one big quad
-        // makes one big cluster and can never be mistaken for a loose panel
-        const i3 = root * 3;
-        if (loX < bmin[i3]) bmin[i3] = loX;
-        if (loY < bmin[i3 + 1]) bmin[i3 + 1] = loY;
-        if (loZ < bmin[i3 + 2]) bmin[i3 + 2] = loZ;
-        if (hiX > bmax[i3]) bmax[i3] = hiX;
-        if (hiY > bmax[i3 + 1]) bmax[i3 + 1] = hiY;
-        if (hiZ > bmax[i3 + 2]) bmax[i3 + 2] = hiZ;
-        tris[root]++;
-        sol[root] |= inBVH;
-        fab[root] |= isFabric;
-        if (pts) {
-          let list = pts[root];
-          if (!list) { list = []; pts[root] = list; }
-          if (list.length < 1800) {
-            list.push((_a.x + _b.x + _c.x) / 3, (_a.y + _b.y + _c.y) / 3, (_a.z + _b.z + _c.z) / 3);
-          }
-        }
-      }
-    }
-
-    // fold every cell onto its root
-    const roots = new Map();
-    for (let i = 0; i < n; i++) {
-      if (tris[i] === 0 && bmin[i * 3] === Infinity) continue;
-      const r = find(i);
-      let c = roots.get(r);
-      if (!c) {
-        c = {
-          root: r, tris: 0, inBVH: 0, fabric: 0, pts: pts ? [] : null,
-          min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity],
-        };
-        roots.set(r, c);
-      }
-      const i3 = i * 3;
-      for (let k = 0; k < 3; k++) {
-        if (bmin[i3 + k] < c.min[k]) c.min[k] = bmin[i3 + k];
-        if (bmax[i3 + k] > c.max[k]) c.max[k] = bmax[i3 + k];
-      }
-      c.tris += tris[i];
-      c.inBVH |= sol[i];
-      c.fabric |= fab[i];
-      if (pts && pts[i]) for (let k = 0; k < pts[i].length; k++) c.pts.push(pts[i][k]);
-    }
-    // roots whose cells only ever received unions carry no extent — drop them
-    for (const [k, c] of roots) if (c.min[0] === Infinity) roots.delete(k);
-
-    this.stats.triangles = triTotal;
+    const { roots, triangles } = clusterIslands(meshes, {
+      cell: CELL, yMin: Y_MIN, yMax: Y_MAX, xzLimit: XZ_LIMIT,
+      inProbe: this._inProbe, surfaceOf: (m) => this.surfaceOf(m),
+      collectPoints: this._collect,
+    });
+    this.stats.triangles = triangles;
     this.stats.clusters = roots.size;
     return roots;
   }
@@ -451,45 +351,9 @@ export class LevelFloatPass {
     return best;
   }
 
-  /**
-   * Closest real surface, searched from the island's own VERTICES in 26
-   * directions. Searching from the bounding box instead is how you end up with a
-   * wire whose lower end is in clear air next to the thing it is holding.
-   */
-  _findAnchor(c, verts) {
-    const cy = (c.min[1] + c.max[1]) * 0.5;
-    let best = null;
-    const step = Math.max(1, Math.floor(verts.length / 16));
-    for (let i = 0; i < verts.length; i += step) {
-      const v = verts[i];
-      for (const dir of FAN) {
-        _o.set(v.x + dir[0] * 0.005, v.y + dir[1] * 0.005, v.z + dir[2] * 0.005);
-        _d.set(dir[0], dir[1], dir[2]);
-        const hit = this.probe.cast(_o, _d, BRACE_REACH);
-        if (!hit || hit.distance < 0.015) continue;   // 0 = its own surface
-        // Prefer anchors at or above the island: a wire from above reads as a
-        // hanging panel, a strut from below reads as a mistake propped up.
-        const lift = hit.point.y - cy;
-        const score = hit.distance - (lift > 0.12 ? 0.45 : 0);
-        if (!best || score < best.score) {
-          best = {
-            score, point: hit.point.clone(), from: v.clone(), dist: hit.distance,
-          };
-        }
-      }
-    }
-    return best;
-  }
-
-  /**
-   * Draw the tie. `verts` are real world-space vertices of the cluster, so the
-   * lower end lands ON the geometry rather than on its bounding box.
-   * @returns {number} wires drawn
-   */
   /* ------------------------------------------------------------------ run */
 
   /**
-   * @param {object} ctx engine context (unused beyond documentation of intent)
    * @param {import('../Level.js').Level} level
    * @param {import('./Kit.js').Batcher} batcher
    * @param {import('./Materials.js').PropMaterials} mats
@@ -548,19 +412,95 @@ export class LevelFloatPass {
     for (const c of suspects) verts.set(c, []);
     this._sampleVertices(meshes, suspects, verts);
 
-    // 3 — verdict
+    /*
+     * ?floatdbg=x,z,r — trace the verdict for the islands near one place.
+     *
+     * The counts this pass prints are aggregate, and aggregate counts are how a
+     * pass gets reported as working while the one object a reviewer named goes on
+     * floating: round 8's console said "28 FLOATING and given 54 visible ties"
+     * and the panel in hero-golden was not one of them. With this you can ask
+     * about that panel specifically and see its band, its measured gap, whether
+     * an anchor was found and how far away it was.
+     */
+    let dbg = null;
+    try {
+      const q = new URLSearchParams(location.search).get('floatdbg');
+      if (q) {
+        const [x, z, r] = q.split(',').map(Number);
+        if (Number.isFinite(x) && Number.isFinite(z)) dbg = { x, z, r: r || 2 };
+      }
+    } catch { /* no URL context */ }
+    const trace = (c, msg) => {
+      if (!dbg) return;
+      const cx = (c.min[0] + c.max[0]) * 0.5, cz = (c.min[2] + c.max[2]) * 0.5;
+      if (Math.hypot(cx - dbg.x, cz - dbg.z) > dbg.r) return;
+      console.info(`[props][floatdbg] ${(c.max[0] - c.min[0]).toFixed(2)}x`
+        + `${(c.max[1] - c.min[1]).toFixed(2)}x${(c.max[2] - c.min[2]).toFixed(2)} @`
+        + `${cx.toFixed(2)},${((c.min[1] + c.max[1]) * 0.5).toFixed(2)},${cz.toFixed(2)} `
+        + `tris=${c.tris} inBVH=${c.inBVH} — ${msg}`);
+    };
+
+    // 3 — verdict, in three bands. See CONTACT_GAP.
     const floating = [];
+    const standoff = [];
     for (const c of suspects) {
-      if (this._resting(c)) { s.resting++; continue; }
+      if (this._resting(c)) { s.resting++; trace(c, 'RESTING'); continue; }
       const gap = this._gap(c, verts.get(c));
-      if (gap <= NEAR_REACH) { s.attached++; continue; }
       c.gap = gap;
+      trace(c, `gap=${Number.isFinite(gap) ? gap.toFixed(3) : '>reach'} verts=${verts.get(c)?.length ?? 0}`);
+      if (gap <= CONTACT_GAP) { s.attached++; continue; }
+      if (gap <= NEAR_REACH) { standoff.push(c); continue; }
       floating.push(c);
+    }
+
+    /*
+     * 3b — the standoff band: a panel a few centimetres off a wall is mounted on
+     * spacers, so draw the spacers. This is the band round 8 exempted, and the
+     * band the review's "clearest case" — the vertical.png plate, measured 9.9 cm
+     * off the hall wall — was sitting in.
+     *
+     * Runs BEFORE the ties, because an island in this band that turns out to have
+     * nothing to bolt to is not held up either, and must therefore not become a
+     * legitimate anchor for the ties in step 4.
+     */
+    const unheld = [];
+    for (const c of standoff) {
+      const vs = verts.get(c);
+      const pairs = vs?.length
+        ? standoffPairs(this.probe, c, vs, { reach: NEAR_REACH + 0.03, count: STANDOFFS })
+        : null;
+      /*
+       * COUNT STUDS, NOT CANDIDATES. This used to branch on `pairs.length`, so a
+       * panel whose candidate pairs all produced degenerate tubes was counted as
+       * bolted, was left out of the `avoid` list below, and then became a
+       * legitimate anchor for the ties in step 4 — which is how the hero-golden
+       * panel ended up strapped to a lagging sleeve that had itself received no
+       * hardware at all. What the pass believes must be what the pass drew.
+       */
+      const n = pairs?.length ? drawStandoff(batcher, mats, pairs, eyeDistance(c, eyes)) : 0;
+      if (n > 0) {
+        s.studs += n;
+        s.bolted++;
+        trace(c, `STANDOFF band, ${n} stud(s) drawn to a surface `
+          + `${pairs[0].from.distanceTo(pairs[0].to).toFixed(3)}m away`);
+      } else {
+        s.attached++;      // nothing to bolt to after all; leave it alone
+        unheld.push({ min: c.min, max: c.max });
+        trace(c, `STANDOFF band, ${pairs?.length ?? 0} candidate(s) but 0 studs drawn `
+          + '— NOT counted as held');
+      }
     }
     if (!floating.length) return s;
 
     // Most visible first, so the brace budget is spent where a reviewer looks.
     floating.sort((a, b) => b.ang - a.ang);
+
+    /*
+     * The boxes a tie may NOT anchor to: everything on this list is itself in
+     * mid-air. Built before any tie is drawn, so the order in which islands are
+     * braced cannot let an early one become a legitimate anchor for a later one.
+     */
+    const avoid = floating.map((f) => ({ min: f.min, max: f.max })).concat(unheld);
 
     // 4 — brace
     for (const c of floating) {
@@ -574,12 +514,21 @@ export class LevelFloatPass {
       const vs = verts.get(c);
       if (s.braced >= MAX_BRACES) {
         s.overBudget++;
+        trace(c, 'FLOATING but over the tie budget');
         if (this.orphans.length < 10) this.orphans.push(`${size} @${where} [over tie budget]`);
         continue;
       }
-      const anchor = vs && vs.length ? this._findAnchor(c, vs) : null;
+      const anchor = vs && vs.length
+        ? findAnchor(this.probe, c, vs, BRACE_REACH, avoid) : null;
       if (anchor) {
-        const w = drawTie(batcher, mats, c, anchor, vs, rng);
+        // The tie's members are sized from the distance a camera sees them at.
+        // A 7.5 mm wire rope 4.2 m from the hero eye is 1.1 px wide: the round-8
+        // ties were geometrically correct and photographically absent, which is
+        // why the review said "no bracket, bolt, hinge or cable".
+        const w = drawTie(batcher, mats, c, anchor, vs, rng, eyeDistance(c, eyes));
+        trace(c, `FLOATING, anchor ${anchor.dist.toFixed(3)}m away at `
+          + `${anchor.point.x.toFixed(2)},${anchor.point.y.toFixed(2)},`
+          + `${anchor.point.z.toFixed(2)} — ${w} tie(s) drawn`);
         if (w) {
           s.braced++;
           s.wires += w;
@@ -591,6 +540,7 @@ export class LevelFloatPass {
         }
       }
       s.unbraceable++;
+      trace(c, `FLOATING and UNBRACEABLE — no non-floating surface within ${BRACE_REACH}m`);
       if (this.orphans.length < 8) this.orphans.push(`${size} @${where}`);
     }
     return s;
@@ -640,7 +590,9 @@ export class LevelFloatPass {
     const s = this.stats;
     return `${s.clusters} world islands from ${(s.triangles / 1000) | 0}k triangles · `
       + `${s.suspects} prop-sized and off the ground: ${s.resting} resting, `
-      + `${s.attached} within ${(NEAR_REACH * 100) | 0}cm of a surface, `
+      + `${s.attached} in contact within ${(CONTACT_GAP * 100) | 0}cm, `
+      + `${s.bolted} STANDING OFF a surface by ${(CONTACT_GAP * 100) | 0}-`
+      + `${(NEAR_REACH * 100) | 0}cm and given ${s.studs} visible spacer stud(s), `
       + `${s.braced} FLOATING and given ${s.wires} visible tie(s), `
       + `${s.unbraceable} floating with nothing within ${BRACE_REACH}m to fasten to, `
       + `${s.overBudget} floating and left for the level agent (tie budget ${MAX_BRACES})`;

@@ -180,21 +180,52 @@ export function buildSpriteAtlas(size = 1024) {
     o[3] = a;
   });
 
-  // ── STAR ──────────────────────────────────────────────────────────────────
+  // ── STAR — the flash bloom ────────────────────────────────────────────────
+  // This was six `pow(cos(theta - k), 26)` needles on a regular 60-degree pitch:
+  // a symmetric asterisk, the shape a lens flare makes and the shape burning
+  // propellant never makes. Three reviews called it a placeholder and they were
+  // right — evenly spaced radial needles are the signature of a UI glyph.
+  //
+  // A real discharge at 1/1000 s is a LOBED, filled, asymmetric bloom: gas leaves
+  // the crown through whatever path it finds, so a few tongues run long and the
+  // rest are stubs, and the whole thing is streaked along the radius by unburnt
+  // grains rather than smooth. So the silhouette here is an angular envelope built
+  // from three low-frequency angular noise fields at incommensurate frequencies —
+  // which has no axis of symmetry anywhere, and cannot acquire one — filled to a
+  // soft edge, multiplied by radial striation, over an incandescent core. The
+  // per-shot `E.P.rot` roll then lands the asymmetry somewhere new every round.
   A.paint(SPRITE.STAR, (u, v, o) => {
     const r = radius(u, v);
     const ang = angleOf(u, v);
-    let spikes = 0;
-    for (let k = 0; k < 6; k++) {
-      const a0 = (k / 6) * Math.PI * 2 + 0.31;
-      const len = 0.55 + 0.45 * hashf(k, 3);
-      const d = Math.cos(ang - a0);
-      spikes += Math.pow(Math.max(0, d), 26) * Math.exp(-r * r * (3.0 / len));
-    }
-    const core = Math.exp(-r * r * 34);
-    const halo = Math.exp(-r * r * 5.0) * 0.3;
-    const a = clamp01(core + halo + spikes * 0.9) * smoothstep(1.05, 0.7, r);
-    o[0] = 1; o[1] = 1; o[2] = 1;
+
+    // How far the flame reaches at this angle. Sums to ~0.5 at the mean with
+    // excursions to roughly 0.25..0.95, i.e. long tongues and short stubs.
+    const lobe = 0.16
+      + 0.42 * noiseAngle(ang + 0.7, 3, 641)
+      + 0.26 * noiseAngle(ang + 2.1, 6, 907)
+      + 0.13 * noiseAngle(ang - 1.3, 11, 313);
+
+    // Filled to a soft inner shoulder rather than outlined: at this exposure a
+    // flash is opaque gas, not a wireframe.
+    const flame = smoothstep(lobe, lobe * 0.30, r);
+
+    // Radial streaking from grains burning outward. Sampled on the circle so it
+    // wraps, and stretched along r so the streaks run outward, not in rings.
+    const stria = 0.52 + 0.48 * fbm2(
+      Math.cos(ang) * 6.5 + r * 1.4, Math.sin(ang) * 6.5 + r * 1.4, 3, 2207,
+    );
+
+    const core = Math.exp(-r * r * 28);
+    const halo = Math.exp(-r * r * 4.4) * 0.24;
+    const a = clamp01(core + halo + flame * stria * 0.92) * smoothstep(1.04, 0.60, r);
+
+    // The core is white-hot and the tongues are cooler flame even before the
+    // per-particle ramp multiplies in — a flat white tile makes the whole bloom
+    // one temperature, which is the other half of why it read as a decal.
+    const heat = clamp01(core * 1.5 + 0.34);
+    o[0] = 1;
+    o[1] = Math.min(1, 0.80 + heat * 0.20);
+    o[2] = Math.min(1, 0.56 + heat * 0.44);
     o[3] = a;
   });
 

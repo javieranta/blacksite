@@ -327,6 +327,89 @@ export function cylG(m, o) {
   rim(hz, zB, r1, 1, capB);
 }
 
+/* -------------------------------------------------------------------- tube */
+
+/**
+ * Hollow tube along Z: outer wall, inner wall, annular end faces, rim chamfers.
+ * Both radii may taper independently (`rIn1` / `rOut1` give the +Z end), which is
+ * what lets one call produce a straight optic body, a flared rubber eyecup or a
+ * lens shade.
+ *
+ * Why this exists rather than two `cylG` calls: a tube made from two cylinders
+ * has no annular end face, so the wall reads as infinitely thin at the aperture
+ * — and the aperture rim is the single most-looked-at edge on a sight, because it
+ * is the boundary of the sight picture. It also has no *inward* normals, so the
+ * bore lights as if it were convex and the inside of the tube goes bright at
+ * exactly the grazing angles where a real tube goes black.
+ *
+ * `capA` / `capB` drop the annulus at the -Z / +Z end for tubes that butt into
+ * something else.
+ */
+export function tubeG(m, o) {
+  const seg = o.seg ?? 28;
+  const len = o.len, hz = len / 2;
+  const rI0 = o.rIn, rI1 = o.rIn1 ?? o.rIn;
+  const rO0 = o.rOut, rO1 = o.rOut1 ?? o.rOut;
+  const c = Math.max(0.0001, Math.min(o.c ?? 0.0006, len * 0.28,
+    (rO0 - rI0) * 0.40, (rO1 - rI1) * 0.40));
+  const cav = o.cav ?? 0;
+  const capA = o.capA !== false, capB = o.capB !== false;
+  const slopeO = (rO1 - rO0) / Math.max(1e-5, len);
+  const slopeI = (rI1 - rI0) / Math.max(1e-5, len);
+  const zA = -hz + c, zB = hz - c;
+  const rOut = (z) => rO0 + slopeO * (z + hz);
+  const rIn = (z) => rI0 + slopeI * (z + hz);
+  const uOf = (i) => (i / seg) * (Math.PI * 2 * (rO0 + rO1) * 0.5) / TEX_M;
+  m.at(o);
+
+  for (let i = 0; i < seg; i++) {
+    const a0 = (i / seg) * Math.PI * 2, a1 = ((i + 1) / seg) * Math.PI * 2;
+    const c0 = Math.cos(a0), s0 = Math.sin(a0), c1 = Math.cos(a1), s1 = Math.sin(a1);
+    // Outward and inward analytic normals, tilted by each wall's own taper.
+    const no0 = norm([c0, s0, -slopeO]), no1 = norm([c1, s1, -slopeO]);
+    const ni0 = norm([-c0, -s0, slopeI]), ni1 = norm([-c1, -s1, slopeI]);
+
+    // ---- outer wall ----
+    const oA = rOut(zA), oB = rOut(zB);
+    m.quad(
+      [[c0 * oA, s0 * oA, zA], [c1 * oA, s1 * oA, zA], [c1 * oB, s1 * oB, zB], [c0 * oB, s0 * oB, zB]],
+      [[uOf(i), zA / TEX_M], [uOf(i + 1), zA / TEX_M], [uOf(i + 1), zB / TEX_M], [uOf(i), zB / TEX_M]],
+      [0, 0, 0, 0], cav, no0, [no0, no1, no1, no0],
+    );
+
+    // ---- inner wall: the bore the shooter looks down ----
+    const iA = rIn(-hz), iB = rIn(hz);
+    m.quad(
+      [[c0 * iA, s0 * iA, -hz], [c1 * iA, s1 * iA, -hz], [c1 * iB, s1 * iB, hz], [c0 * iB, s0 * iB, hz]],
+      [[uOf(i), -hz / TEX_M], [uOf(i + 1), -hz / TEX_M], [uOf(i + 1), hz / TEX_M], [uOf(i), hz / TEX_M]],
+      [0, 0, 0, 0], Math.max(cav, 0.55), ni0, [ni0, ni1, ni1, ni0],
+    );
+
+    // ---- rim chamfers + annular end faces ----
+    for (const end of [-1, 1]) {
+      if (end < 0 ? !capA : !capB) continue;
+      const zO = end * hz, zI = end < 0 ? zA : zB;
+      const rO = rOut(zO), rC = Math.max(rIn(zO) + 0.00005, rO - c);
+      const rIe = rIn(zO);
+      const n0 = norm([c0 * 0.7, s0 * 0.7, end * 0.7]);
+      const n1 = norm([c1 * 0.7, s1 * 0.7, end * 0.7]);
+      // The 45-degree strip that keeps the outer rim from being a hard edge.
+      m.quad(
+        [[c0 * rOut(zI), s0 * rOut(zI), zI], [c1 * rOut(zI), s1 * rOut(zI), zI],
+          [c1 * rC, s1 * rC, zO], [c0 * rC, s0 * rC, zO]],
+        null, [1, 1, 1, 1], cav, n0, [n0, n1, n1, n0],
+      );
+      // The wall thickness itself, seen end-on — the aperture rim.
+      const nz = [0, 0, end];
+      m.quad(
+        [[c0 * rIe, s0 * rIe, zO], [c1 * rIe, s1 * rIe, zO],
+          [c1 * rC, s1 * rC, zO], [c0 * rC, s0 * rC, zO]],
+        null, [0.85, 0.85, 1, 1], cav, nz, [nz, nz, nz, nz],
+      );
+    }
+  }
+}
+
 /* ------------------------------------------------------------------- prism */
 
 /**

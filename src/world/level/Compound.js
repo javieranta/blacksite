@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { chamferBox, corrugated, cyl, tube, jitter, rng } from './GeoKit.js';
 import {
   wall, windowUnit, doorUnit, slab, pillar, ibeam,
-  stair, railingRun, catwalk, pipeRun, truss, jersey, kerb, ramp, coping,
+  stair, railingRun, catwalk, pipeRun, truss, jersey, kerb, ramp, coping, landing,
   ladder, stack, tank, haunch, basePlate, dripEdge,
 } from './Modules.js';
 import { L, pave } from './Site.js';
@@ -170,14 +170,21 @@ export function buildCanopy(b, w) {
       });
     }
   }
-  // signage gantry across the entry, gives the skyline a horizontal break
+  // Signage gantry across the entry, gives the skyline a horizontal break.
+  //
+  // TRAVERSAL: the east post used to stand at x = 24.5 and the girder spanned
+  // the whole way to it at y = 6.0. The admin bridge catwalk runs along
+  // x 20.2..21.8 at deck level 4.70, so a player on that bridge has their head
+  // at 6.48 — the girder was a 0.48 m low bridge across it and the ring was cut
+  // in two. Stopping the span at x = 19.4 clears the bridge and the new stair
+  // tower at x = 23.2 both.
   b.box('metal_rusted', 11.5, 3.2, 12.0, 0.24, 6.4, 0.24, { zone, bevel: 0.02, seg: 3 });
-  b.box('metal_rusted', 24.5, 3.2, 12.0, 0.24, 6.4, 0.24, { zone, bevel: 0.02, seg: 3 });
+  b.box('metal_rusted', 19.4, 3.2, 12.0, 0.24, 6.4, 0.24, { zone, bevel: 0.02, seg: 3 });
   truss(b, {
-    from: new THREE.Vector3(11.5, 6.0, 12.0), to: new THREE.Vector3(24.5, 6.0, 12.0),
-    depth: 0.9, width: 0.8, chord: 0.05, bays: 9, zone,
+    from: new THREE.Vector3(11.5, 6.0, 12.0), to: new THREE.Vector3(19.4, 6.0, 12.0),
+    depth: 0.9, width: 0.8, chord: 0.05, bays: 6, zone,
   });
-  b.box('metal_painted', 18.0, 6.9, 12.0, 6.4, 1.1, 0.12, { zone, bevel: 0.02, seg: 3 });
+  b.box('metal_painted', 15.45, 6.9, 12.0, 5.4, 1.1, 0.12, { zone, bevel: 0.02, seg: 3 });
 }
 
 /* ---------------------------------------------------------------- courtyard - */
@@ -263,7 +270,7 @@ export function buildCourtyard(b, w) {
 
   // heavy concrete blocks — chest-high cover with real chamfers and wear
   const blocks = [[16.0, 24.0, 1.8, 1.35, 1.8],
-    [4.0, 28.5, 2.8, 1.2, 1.4], [21.0, 27.5, 1.6, 1.9, 1.6], [11.5, 35.5, 3.2, 1.1, 1.5]];
+    [4.0, 28.5, 2.8, 1.2, 1.4], [21.0, 27.5, 1.6, 1.9, 1.6], [7.0, 34.5, 3.2, 1.1, 1.5]];
   for (const [x, z, bw, bh, bd] of blocks) {
     b.box('concrete', x, bh / 2, z, bw, bh, bd,
       { zone, bevel: 0.05, seg: 4, jitter: 0.02, ry: (r() - 0.5) * 0.06 });
@@ -279,8 +286,20 @@ export function buildCourtyard(b, w) {
   // loading dock along the east side, 1.2m, with edge protection and steps
   b.box('concrete', 24.0, 0.6, 26.0, 4.0, 1.2, 16.0, { zone, bevel: 0.05, seg: 6 });
   b.box('metal_rusted', 22.05, 1.14, 26.0, 0.12, 0.24, 16.0, { zone, bevel: 0.03 });
+  // Dock steps. These used to be four boxes stacked at the SAME z (0.62, 0.60,
+  // 0.58, 0.56 deep, all centred on z = 19.0), which is a 1.2 m vertical face
+  // dressed up as a stair — nobody could walk up it. Four real 300 mm risers
+  // with a 450 mm going, climbing east into the dock face.
   for (let i = 0; i < 4; i++) {
-    b.box('concrete', 21.4, 0.15 + i * 0.3, 19.0, 1.6, 0.3, 0.62 - i * 0.02, { zone, bevel: 0.02, seg: 2 });
+    const wide = i === 3 ? 0.65 : 0.45;
+    b.box('concrete', 20.275 + i * 0.45 + (wide - 0.45) / 2, 0.15 * (i + 1), 19.0,
+      wide, 0.3 * (i + 1), 1.7, { zone, bevel: 0.02, seg: 2 });
+  }
+  for (const s of [-1, 1]) {
+    railingRun(b, {
+      from: new THREE.Vector3(19.9, 0, 19.0 + s * 0.9),
+      to: new THREE.Vector3(22.0, 1.2, 19.0 + s * 0.9), zone, height: 1.05, toe: false,
+    });
   }
   for (const z of [23.0, 26.2, 29.4, 32.6]) {
     b.box('fabric', 22.1, 0.8, z, 0.22, 0.9, 0.5, { zone, bevel: 0.06, seg: 3 });
@@ -293,7 +312,7 @@ export function buildCourtyard(b, w) {
   dripEdge(b, { x: 21.96, y: 0.9, z: 26.0, len: 16.0, axis: 'z', zone });
 
   // bollards guarding the channel crossings (never at z = 20.4 — the siding)
-  for (const z of [11.5, 17.0, 27.0, 34.0]) {
+  for (const z of [11.5, 17.0, 27.0, 39.0]) {
     for (const s of [-1, 1]) {
       b.geo('metal_painted', cyl(0.09, 0.11, 1.0, 12), b.xform(13.2 + s * 1.55, 0.5, z, {}),
         { zone, tile: 0.8 });
@@ -302,35 +321,42 @@ export function buildCourtyard(b, w) {
     }
   }
 
-  // stair tower up to the catwalk ring — the elevated position
-  const zone2 = 'stairs';
-  b.box('concrete', 22.6, 2.35, 14.5, 3.4, 4.7, 0.36, { zone: zone2, bevel: 0.035, seg: 4 });
-  b.box('concrete', 24.15, 2.35, 16.2, 0.36, 4.7, 3.8, { zone: zone2, bevel: 0.035, seg: 4 });
-  stair(b, {
-    x: 21.0, y: 0, z: 12.4, steps: 13, rise: 0.185, run: 0.3, width: 1.5,
-    dir: new THREE.Vector3(0, 0, 1), zone: zone2, mat: 'concrete', railSides: [-1],
-  });
-  stair(b, {
-    x: 21.0, y: 2.405, z: 18.4, steps: 13, rise: 0.177, run: 0.3, width: 1.5,
-    dir: new THREE.Vector3(0, 0, -1), zone: zone2, mat: 'concrete', railSides: [1],
-  });
-  slab(b, { x: 21.0, y: 2.32, z: 17.2, w: 1.9, d: 1.9, thick: 0.24, zone: zone2 });
-  slab(b, { x: 21.0, y: L.deck - 0.12, z: 15.0, w: 1.9, d: 2.6, thick: 0.24, zone: zone2 });
-  railingRun(b, {
-    from: new THREE.Vector3(20.05, L.deck, 13.7), to: new THREE.Vector3(21.95, L.deck, 13.7), zone: zone2,
-  });
+  buildStairTower(b, w);
 
-  // catwalk ring: stair head -> north over the courtyard -> pump house
+  // catwalk ring: stair head -> north over the courtyard -> west stair.
+  //
+  // The east-west leg used to run at z = 30.0. The pump house's south parapet is
+  // a 9.7 m slab at (17.2, 4.5..5.4, 29.73..30.07) — dead down the middle of
+  // that walkway and 0.7 m proud of its deck, so the leg was impassable for its
+  // whole length. At z = 27.6 it clears the parapet.
+  //
+  // The junction pad where the west leg tees off is left unrailed on purpose: a
+  // railing run across a tee is a wall, and that is exactly how the old ring
+  // dead-ended.
   catwalk(b, {
-    from: new THREE.Vector3(21.0, L.deck, 15.9), to: new THREE.Vector3(21.0, L.deck, 30.0),
-    width: 1.6, zone: 'catwalk',
+    from: new THREE.Vector3(21.0, L.deck, 26.8), to: new THREE.Vector3(21.0, L.deck, 28.4),
+    width: 1.6, zone: 'catwalk', rail: false,
+  });
+  railingRun(b, {
+    from: new THREE.Vector3(20.16, L.deck, 28.4), to: new THREE.Vector3(21.84, L.deck, 28.4),
+    zone: 'catwalk', height: 1.1,
   });
   catwalk(b, {
-    from: new THREE.Vector3(21.0, L.deck, 30.0), to: new THREE.Vector3(13.2, L.deck, 30.0),
-    width: 1.6, zone: 'catwalk',
+    from: new THREE.Vector3(20.2, L.deck, 27.6), to: new THREE.Vector3(13.2, L.deck, 27.6),
+    width: 1.6, zone: 'catwalk', rail: false,
+  });
+  for (const s of [-1, 1]) {
+    railingRun(b, {
+      from: new THREE.Vector3(20.2, L.deck, 27.6 + s * 0.84),
+      to: new THREE.Vector3(13.2, L.deck, 27.6 + s * 0.84), zone: 'catwalk', height: 1.1,
+    });
+  }
+  railingRun(b, {
+    from: new THREE.Vector3(13.2, L.deck, 26.76), to: new THREE.Vector3(13.2, L.deck, 28.44),
+    zone: 'catwalk', height: 1.1,
   });
   // stanchions. z = 18.4 rather than 20 so the rail siding runs clear of it.
-  for (const [x, z] of [[21.0, 18.4], [21.0, 26.0], [17.5, 30.0]]) {
+  for (const [x, z] of [[21.0, 18.4], [21.0, 26.0], [16.5, 27.6]]) {
     b.box('metal_painted', x, L.deck / 2 - 0.2, z, 0.26, L.deck - 0.4, 0.26,
       { zone: 'catwalk', bevel: 0.02, seg: 3 });
     basePlate(b, { x, y: 0, z, size: 0.46, zone: 'catwalk', ribAxis: 'x', stem: 0.11 });
@@ -342,6 +368,209 @@ export function buildCourtyard(b, w) {
   }
 
   buildGantry(b);
+  buildDockStair(b);
+  buildCrateClimb(b);
+}
+
+/* ------------------------------------------------------------ stair tower --- */
+
+/**
+ * The courtyard's main climb: two straight flights and an intermediate landing
+ * from the paving at y = 0 to the catwalk deck at L.deck, against a full-height
+ * concrete flank wall.
+ *
+ * THIS BLOCK IS TRAVERSAL-CRITICAL AND `tools/traversal.mjs` ASSERTS IT.
+ * Two rules govern everything in it. Both were broken for ten rounds.
+ *
+ *  1. NOTHING MAY CROSS A FLIGHT. The previous revision opened with
+ *       b.box('concrete', 22.6, 2.35, 14.5, 3.4, 4.7, 0.36)
+ *     which is a wall spanning x 20.9..24.3 at z 14.32..14.68 — straight across
+ *     its own staircase at x 21 +- 0.75. The player climbed seven of thirteen
+ *     treads and stopped at z = 13.98, i.e. the wall face at 14.32 minus the
+ *     0.34 m capsule radius. A stair tower is walled BESIDE and BEHIND its
+ *     flights; the flank wall here is at x = 24.2, parallel to the run.
+ *
+ *  2. NOTHING MAY BE WITHIN 1.78 m ABOVE A TREAD. The flights used to run at
+ *     x = 21, directly beneath the two catwalk decks on that centre line (the
+ *     admin bridge over z 10.0..15.9 and the north leg beyond it). Bar grating
+ *     has its soffit at deck - 0.043, so a player whose feet pass y = 2.88 under
+ *     one of those decks is walking head-first into it: the upper flight was
+ *     unclimbable even with the wall removed. x = 23.2 puts the whole climb in
+ *     the clear, and the head landing joins the ring from the side through a
+ *     deliberate rail-free window in the north leg.
+ */
+function buildStairTower(b, w) {
+  const zone = 'stairs';
+  const SX = 23.2;                       // stair centre-line, clear of the deck at x = 21
+  const R1 = 0.185, R2 = 0.177;          // 13 + 13 risers = 4.706 = L.deck + 0.006
+
+  // flight 1: paving 0.000 -> half landing 2.405, z 9.2 .. 13.1
+  stair(b, {
+    x: SX, y: 0, z: 9.2, steps: 13, rise: R1, run: 0.30, width: 1.5,
+    dir: new THREE.Vector3(0, 0, 1), zone, mat: 'concrete', railSides: [-1],
+  });
+  landing(b, { x: SX, y: 2.285, z: 13.85, w: 1.9, d: 1.5, thick: 0.24, zone });
+  railingRun(b, {
+    from: new THREE.Vector3(SX - 0.95, 2.405, 13.0),
+    to: new THREE.Vector3(SX - 0.95, 2.405, 14.4), zone, height: 1.05,
+  });
+  // flight 2: half landing 2.405 -> deck 4.706, z 14.3 .. 18.2
+  stair(b, {
+    x: SX, y: 2.405, z: 14.3, steps: 13, rise: R2, run: 0.30, width: 1.5,
+    dir: new THREE.Vector3(0, 0, 1), zone, mat: 'concrete', railSides: [-1],
+  });
+  // Head landing. Its south edge is at z = 18.2, exactly where flight 2 tops
+  // out, so no part of it is ever over a tread — see rule 2.
+  landing(b, { x: 23.1, y: L.deck - 0.12, z: 19.1, w: 2.6, d: 1.8, thick: 0.24, zone });
+  railingRun(b, {
+    from: new THREE.Vector3(21.8, L.deck, 20.0), to: new THREE.Vector3(24.4, L.deck, 20.0), zone,
+  });
+  railingRun(b, {
+    from: new THREE.Vector3(24.4, L.deck, 20.0), to: new THREE.Vector3(24.4, L.deck, 18.2), zone,
+  });
+  railingRun(b, {
+    from: new THREE.Vector3(24.4, L.deck, 18.2), to: new THREE.Vector3(23.95, L.deck, 18.2), zone,
+  });
+  railingRun(b, {
+    from: new THREE.Vector3(22.45, L.deck, 18.2), to: new THREE.Vector3(21.8, L.deck, 18.2), zone,
+  });
+
+  // flank wall + backstop. Both parallel to or behind the run, never across it.
+  b.box('concrete', 24.2, 2.35, 14.5, 0.32, 4.7, 11.0, { zone, bevel: 0.035, seg: 5 });
+  coping(b, { x: 24.2, y: 4.7, z: 14.5, w: 0.52, len: 11.0, zone });
+  // Backstop behind the head landing. It starts AT deck level, not at the
+  // ground: the loading dock runs underneath from z 18 to 34 and the dock fire
+  // stair springs off it, so a full-height return here divides the dock in two
+  // and strands the second climb. Measured: the player walked north along the
+  // dock and stopped dead at z = 19.89 against the earlier full-height version.
+  b.box('concrete', 23.15, L.deck + 0.6, 20.16, 2.5, 1.2, 0.32, { zone, bevel: 0.035, seg: 4 });
+  coping(b, { x: 23.15, y: L.deck + 1.2, z: 20.16, w: 0.52, len: 2.5, zone });
+  // west columns carrying the two landings (the flank wall carries the east)
+  for (const [cx, cz, ch] of [[22.35, 13.7, 2.16], [22.2, 19.6, 4.46]]) {
+    b.box('metal_painted', cx, ch / 2, cz, 0.22, ch, 0.22, { zone, bevel: 0.02, seg: 3 });
+    basePlate(b, { x: cx, y: 0, z: cz, size: 0.4, zone, ribAxis: 'z', stem: 0.1 });
+  }
+
+  // The ring's north leg, split so the head landing can join it from the east.
+  // A continuous railing along x = 21.84 would have sealed the stair off from
+  // the very walkway it exists to reach.
+  catwalk(b, {
+    from: new THREE.Vector3(21.0, L.deck, 15.9), to: new THREE.Vector3(21.0, L.deck, 20.2),
+    width: 1.6, zone: 'catwalk', rail: false,
+  });
+  catwalk(b, {
+    from: new THREE.Vector3(21.0, L.deck, 20.2), to: new THREE.Vector3(21.0, L.deck, 26.8),
+    width: 1.6, zone: 'catwalk',
+  });
+  railingRun(b, {
+    from: new THREE.Vector3(20.16, L.deck, 15.9), to: new THREE.Vector3(20.16, L.deck, 20.2),
+    zone: 'catwalk', height: 1.1,
+  });
+  railingRun(b, {
+    from: new THREE.Vector3(21.84, L.deck, 15.9), to: new THREE.Vector3(21.84, L.deck, 18.2),
+    zone: 'catwalk', height: 1.1,
+  });
+
+  w.enemySpawns.push(new THREE.Vector3(SX, 2.405 + 1.78, 13.7));
+  w.lightAnchors.push({
+    position: new THREE.Vector3(23.9, 4.2, 12.0), colour: 0xffe6bd,
+    intensity: 14, distance: 13, kind: 'wallpack', priority: 4,
+  });
+}
+
+/* --------------------------------------------------------- dock fire stair -- */
+
+/**
+ * The ring's second ground connection, and the second half of a two-stage
+ * climb: the dock steps lift you 1.20 m onto the loading dock, and this open
+ * steel flight takes the remaining 3.50 m from the dock deck up to the catwalk
+ * ring, arriving at the same unrailed tee the west leg branches from.
+ *
+ * Sited on the dock rather than in the courtyard on purpose — the courtyard
+ * between x 9 and 14 is the hero framing's midground AND it carries the open
+ * drainage channel at x 12.28..14.12, so a stair there would have straddled a
+ * 1.9 m trough in the middle of the money shot.
+ */
+function buildDockStair(b) {
+  const zone = 'stairs';
+  // 19 x 0.1842 = 3.50 m, dock 1.20 -> deck 4.70, ending exactly at the head pad
+  stair(b, {
+    x: 24.2, y: 1.2, z: 21.1, steps: 19, rise: 0.1842, run: 0.30, width: 1.4,
+    dir: new THREE.Vector3(0, 0, 1), zone, mat: 'metal_rusted',
+    stringerMat: 'metal_painted', railSides: [-1, 1],
+  });
+  // Head pad spans west to x = 21.8, so it lands on the ring's junction pad
+  // without a railing between the two.
+  landing(b, {
+    x: 23.3, y: L.deck - 0.1, z: 27.6, w: 3.0, d: 1.6, thick: 0.2, zone,
+    mat: 'metal_rusted', fascia: 0.26,
+  });
+  railingRun(b, {
+    from: new THREE.Vector3(21.8, L.deck, 28.4), to: new THREE.Vector3(24.8, L.deck, 28.4), zone,
+  });
+  railingRun(b, {
+    from: new THREE.Vector3(24.8, L.deck, 28.4), to: new THREE.Vector3(24.8, L.deck, 26.8), zone,
+  });
+  railingRun(b, {
+    from: new THREE.Vector3(24.8, L.deck, 26.8), to: new THREE.Vector3(24.95, L.deck, 26.8), zone,
+  });
+  railingRun(b, {
+    from: new THREE.Vector3(21.8, L.deck, 26.8), to: new THREE.Vector3(23.4, L.deck, 26.8), zone,
+  });
+  for (const [cx, cz] of [[23.45, 27.6], [24.95, 27.6], [23.45, 24.0], [24.95, 24.0]]) {
+    const ch = cz > 26 ? L.deck - 0.1 : 2.6;
+    b.box('metal_painted', cx, 1.2 + ch / 2, cz, 0.2, ch, 0.2, { zone, bevel: 0.02, seg: 3 });
+  }
+}
+
+/* --------------------------------------------------- stacked-crate climb ---- */
+
+/**
+ * The informal route: a haul ramp onto a low plinth, then three stacked steel
+ * crates whose tops step up in 1.1-1.2 m increments — every one of them inside
+ * PLAYER.mantleMaxHeight (1.35 m) — finishing on the pump house roof at 4.65.
+ * Climbable both ways: the same steps read as a descent because each drop is
+ * short enough that the fall costs nothing.
+ */
+function buildCrateClimb(b) {
+  const zone = 'court';
+  // Haul ramp up onto a 0.55 m plinth, so the first move is a walk, not a jump.
+  // The whole route sits north of z = 29: the revetment at (10.2, 27.8) reaches
+  // z 28.5 and the west catwalk leg's shadow z 26.8..28.4, and the first siting
+  // of this ramp put its toe inside the revetment — measured, the player moved
+  // 0.58 m and stopped.
+  ramp(b, { x: 10.6, y: 0, z: 30.4, rise: 0.55, len: 2.6, width: 2.6, ry: 0, zone });
+  b.box('concrete', 10.6, 0.275, 32.6, 2.6, 0.55, 2.0, { zone, bevel: 0.05, seg: 4, jitter: 0.014 });
+  coping(b, { x: 9.3, y: 0.55, z: 32.6, w: 0.5, len: 2.0, ry: Math.PI / 2, zone });
+
+  // Three crates. Tops 1.62 / 2.78 / 3.90, so the rises off the plinth are 1.07,
+  // 1.16 and 1.12 — every one inside PLAYER.mantleMaxHeight = 1.35 — and the
+  // last move onto the pump house roof edge beam at 4.68 is 0.78.
+  // Every crate stays west of x = 12.4: the pump house west wall is at
+  // x 12.43..12.77 and its roof edge beam at x 12.39..12.61, and a crate that
+  // intersects either would be a wall pretending to be a step.
+  const crates = [
+    [10.60, 34.50, 2.40, 1.80, 1.62, 0.05],
+    [10.60, 36.20, 2.20, 1.60, 2.78, -0.07],
+    [11.45, 35.90, 1.85, 1.70, 3.90, 0.04],
+  ];
+  for (const [cx, cz, cw, cd, top, ry] of crates) {
+    b.box('metal_painted', cx, top / 2, cz, cw, top, cd, { zone, bevel: 0.03, seg: 4, ry });
+    for (const sx of [-1, 1]) {
+      for (const sz of [-1, 1]) {
+        b.box('metal_rusted', cx + sx * (cw / 2 - 0.07), top / 2, cz + sz * (cd / 2 - 0.07),
+          0.11, top - 0.06, 0.11, { zone, bevel: 0.014, ry });
+      }
+    }
+    b.box('metal_rusted', cx, top + 0.03, cz, cw + 0.08, 0.06, cd + 0.08, { zone, bevel: 0.02, ry });
+    for (let i = 0; i < 3; i++) {
+      b.box('metal_rusted', cx, top * (0.26 + i * 0.24), cz - cd / 2, cw - 0.32, 0.055, 0.05,
+        { zone, bevel: 0.01, ry });
+    }
+  }
+  // The last crate is offset east to x 10.525..12.375, i.e. hard against the
+  // roof edge beam without touching it, so the final move is a 0.78 m mantle
+  // eastward onto the pump house roof at 4.65 — and a 0.78 m drop coming back.
 }
 
 /**

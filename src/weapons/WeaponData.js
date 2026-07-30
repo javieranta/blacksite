@@ -142,6 +142,136 @@ export const WEAPONS = {
 export const WEAPON_ORDER = ['ar_vector', 'smg_wraith', 'dmr_lancet'];
 
 /**
+ * VIEWMODEL GEOMETRY — one entry per weapon id, consumed by
+ * `viewmodel/Weapon.js`. Metres, in weapon space: bore along -Z, +X right,
+ * origin at the centre of the magwell.
+ *
+ * ─── WHY THIS TABLE EXISTS ────────────────────────────────────────────────
+ *
+ * Three weapons have been switchable since round 5 — keys 1/2/3 already changed
+ * the ammo, the RPM, the recoil pattern and the handling — and all three
+ * rendered as the same carbine, because `ViewModel.init` called `buildWeapon()`
+ * once and `weapon:switch` only reset the reload timer. A player pressing 2 saw
+ * the name change and the gun not, which is why "give me a smaller gun" was
+ * filed as a missing feature for a weapon that was already in the build.
+ *
+ * ─── THE TWO INVARIANTS, AND WHY THEY ARE NOT NEGOTIABLE ──────────────────
+ *
+ * The gloved hands in `viewmodel/Hands.js` are solved against TWO surfaces:
+ * the pistol grip (`GRIP` / `GRIP_SEC`) and the handguard-plus-rail outline
+ * (`HG_SEC`), and that file is owned by another agent. Every finger joint sits
+ * exactly one half-thickness off those sections, walked by chord length. Move
+ * either section and the fingers float or sink — a defect that took six rounds
+ * to remove the first time.
+ *
+ * So every weapon here declares:
+ *   • the SAME pistol grip and lower receiver. Real weapon families share a
+ *     lower; this one shares it because the firing hand is welded to it.
+ *   • the SAME handguard cross-section (38 mm octagon on a 30 mm bore) and the
+ *     SAME rail height (railY 0.0560). Only the handguard's LENGTH varies.
+ *   • nothing bolted to the handguard between z = -0.150 and z = -0.075, which
+ *     is where the support hand's four rows and its thumb live. The SMG has no
+ *     accessory rail stub and no QD socket for exactly this reason: its
+ *     handguard is too short to carry them clear of the fingers.
+ *
+ * Everything else — receiver length and section, barrel, muzzle device, stock,
+ * magazine, optic and the hip pose — is per weapon, and that is enough to make
+ * the three silhouettes measurably different (see tools/loadoutcheck.mjs).
+ *
+ * Overall length, muzzle anchor to buttpad:
+ *   WRAITH-9    357 mm     LANCET MK4  718 mm     VK-7  556 mm
+ */
+export const VIEWMODEL = {
+  ar_vector: {
+    boreY: 0.0300, upperY: 0.0335, upperW: 0.0400, upperH: 0.0450,
+    upperZ0: -0.0620, upperZ1: 0.1520,
+    railY: 0.0560, railZ0: -0.2050, railZ1: 0.1500,
+    hgZ0: -0.2050, hgZ1: -0.0600,
+    // `z0` is the muzzle end of the plain barrel; the device hangs off it.
+    bar: { r0: 0.0092, r1: 0.0102, z0: -0.2960, z1: -0.1980, gasY: 0.0424, gasZ: -0.2178 },
+    dev: { r: 0.0132, len: 0.0380, teeth: 20, ports: 3 },
+    acc: { stub: [-0.1900, -0.1420], stop: -0.1660, qd: -0.1500 },
+    cover0: -0.1700, iron0: -0.1780,
+    mag: { w: 0.0272, h: 0.0560, len: 0.1275, curve: 0, rows: 3, sp: 0.0230 },
+    stock: {
+      x: 0, y: 0.0300, z: 0.1320, ry: 0, zk: 1, hk: 1,
+      tube: true, cheek: true, fold: false, riser: 0,
+    },
+    optic: {
+      rIn: 0.0120, wall: 0.0024, depth: 0.0160, rise: 0.0330, z: -0.0620,
+      relief: 0.0820, shadeIn: 0.0134, shadeOut: 0.0154, bell: 0, pupil: 0.0125,
+      vig: [0.0125, 0.0290], cross: 0,
+    },
+    pose: { hip: [0.1850, -0.1790, -0.6150], rot: [0.0450, 0.2450, 0.0900] },
+  },
+
+  /**
+   * WRAITH-9 — the compact. Everything that can be shortened is: a 104 mm
+   * handguard against the carbine's 145, a 52 mm barrel behind a stubby
+   * birdcage, a 164 mm receiver, no gas system at all (it is a blowback 9 mm,
+   * so the gas block and tube are simply absent — a real difference a player
+   * can point at), a curved 9 mm magazine, and a stock that is FOLDED against
+   * the left flank rather than extended. The fold is what removes 88 mm of
+   * silhouette in one move, and it folds LEFT because the first-person camera
+   * sits 313 mm to the left of the bore and would never see a right-side fold.
+   */
+  smg_wraith: {
+    boreY: 0.0300, upperY: 0.0322, upperW: 0.0368, upperH: 0.0418,
+    upperZ0: -0.0560, upperZ1: 0.1120,
+    railY: 0.0560, railZ0: -0.1560, railZ1: 0.1100,
+    hgZ0: -0.1560, hgZ1: -0.0520,
+    bar: { r0: 0.0084, r1: 0.0092, z0: -0.2020, z1: -0.1500, gasY: 0, gasZ: 0 },
+    dev: { r: 0.0108, len: 0.0260, teeth: 16, ports: 3 },
+    // No stub and no QD socket: on a 104 mm handguard both would land under the
+    // support hand's fingers. The handstop moves to the front lip, where it is
+    // below the bore and clear of every digit.
+    acc: { stub: null, stop: -0.1480, qd: null },
+    cover0: -0.1460, iron0: -0.1530,
+    mag: { w: 0.0262, h: 0.0420, len: 0.1360, curve: 0.155, rows: 3, sp: 0.0230 },
+    stock: {
+      x: -0.0215, y: 0.0300, z: 0.1120, ry: -2.90, zk: 0.86, hk: 0.92,
+      tube: false, cheek: false, fold: true, riser: 0,
+    },
+    optic: {
+      rIn: 0.0102, wall: 0.0022, depth: 0.0140, rise: 0.0290, z: -0.0560,
+      relief: 0.0760, shadeIn: 0.0118, shadeOut: 0.0136, bell: 0, pupil: 0.0110,
+      vig: [0.0113, 0.0262], cross: 0,
+    },
+    pose: { hip: [0.1780, -0.1700, -0.6250], rot: [0.0450, 0.2350, 0.0900] },
+  },
+
+  /**
+   * LANCET MK4 — the marksman rifle. Longer and heavier everywhere: a 253 mm
+   * receiver in a fatter 44 x 50 mm section, a 190 mm handguard, a 130 mm
+   * barrel behind a four-port brake, a 20-round 7.62 magazine and a full stock
+   * with an adjustable cheek riser. The optic is a 31 mm-bore prism scope with
+   * a flared objective bell and an etched crosshair instead of a dot — at 90 mm
+   * eye relief its window is 261 px across at 1080p against the carbine's 245.
+   */
+  dmr_lancet: {
+    boreY: 0.0300, upperY: 0.0345, upperW: 0.0440, upperH: 0.0500,
+    upperZ0: -0.0750, upperZ1: 0.1780,
+    railY: 0.0560, railZ0: -0.2600, railZ1: 0.1760,
+    hgZ0: -0.2600, hgZ1: -0.0700,
+    bar: { r0: 0.0104, r1: 0.0116, z0: -0.3900, z1: -0.2600, gasY: 0.0430, gasZ: -0.2820 },
+    dev: { r: 0.0146, len: 0.0460, teeth: 24, ports: 4 },
+    acc: { stub: [-0.2450, -0.1970], stop: -0.2210, qd: -0.2050 },
+    cover0: -0.2250, iron0: -0.2330,
+    mag: { w: 0.0288, h: 0.0640, len: 0.1480, curve: 0.070, rows: 3, sp: 0.0270 },
+    stock: {
+      x: 0, y: 0.0300, z: 0.1580, ry: 0, zk: 1.30, hk: 1.10,
+      tube: true, cheek: true, fold: false, riser: 0.0170,
+    },
+    optic: {
+      rIn: 0.0155, wall: 0.0030, depth: 0.0320, rise: 0.0360, z: -0.0480,
+      relief: 0.0900, shadeIn: 0.0186, shadeOut: 0.0210, bell: 0.0224, pupil: 0.0125,
+      vig: [0.0168, 0.0392], cross: 1,
+    },
+    pose: { hip: [0.1930, -0.1880, -0.6600], rot: [0.0480, 0.2600, 0.0920] },
+  },
+};
+
+/**
  * Terminal-ballistics tuning. Lives here rather than in core/Constants.js
  * because Constants.js is not owned by this agent; it is the canonical home for
  * a `BALLISTICS` block and should be moved there when one agent owns that file.

@@ -42,6 +42,25 @@ export const DECAL = {
   wash: [3, 2],
   grit: [0, 1],
   paint: [1, 1],
+  /* Incident, added for the surface-story pass — see paint/Extras.js. */
+  spall: [2, 1],
+  drainCover: [3, 1],
+  hazard: [0, 0],
+  spill: [1, 0],
+  rustRun: [2, 0],
+  chips: [3, 0],
+};
+
+/** 4x4 grime atlas cells — the multiply layer; see paint/Extras.buildGrimeAtlas. */
+export const GRIME = {
+  pool: [0, 3],
+  edge: [1, 3],
+  bleed: [2, 3],
+  mottleA: [3, 3],
+  mottleB: [0, 2],
+  lane: [1, 2],
+  drain: [2, 2],
+  foot: [3, 2],
 };
 
 const _v = new THREE.Vector3();
@@ -168,9 +187,26 @@ export function groundMarks(api, samples, {
       if (prev) {
         for (const side of [-0.5, 0.5]) {
           const nx = Math.sin(prev.a) * side * gauge, nz = -Math.cos(prev.a) * side * gauge;
+          /*
+           * ALPHA ABOVE 1 IS THE LEVER, NOT COLOUR.
+           *
+           * The atlas cell for a tyre track peaks at 0.20 alpha — deliberately,
+           * after a round in which tracks read as "black gaffer tape". The
+           * correction went too far and tools/groundcheck.mjs measured the
+           * result: authored content moved 38% of the hero floor's pixels by a
+           * mean of 6.2/255, i.e. it was there and invisible, and only 0.73 of
+           * the floor's 10.6 block variance was authored at all.
+           *
+           * Darkening the tint cannot fix that: vColor multiplies ALBEDO, and at
+           * 0.2 coverage a black mark and a grey one differ by 3/255. The per-quad
+           * alpha multiplies COVERAGE and is not clamped before blending, so a
+           * value above 1 scales the whole cell up while keeping every feathered
+           * edge feathered — which is the property that stopped it reading as
+           * tape.
+           */
           const q = segment(DECAL.tyre,
             prev.x + nx, prev.y, prev.z + nz,
-            node.x + nx, node.y, node.z + nz, width);
+            node.x + nx, node.y, node.z + nz, width, null, 2.4);
           if (q) { quads.push(q); laid++; }
         }
       }
@@ -189,7 +225,7 @@ export function groundMarks(api, samples, {
     if (!g) continue;
     const w = rng.range(1.1, 3.2);
     quads.push(patch(DECAL.scuff, s.x + rng.jit(1.1), g.point.y + 0.011, s.z + rng.jit(1.1),
-      w, w * rng.range(0.35, 0.8), rng.range(0, Math.PI * 2)));
+      w, w * rng.range(0.35, 0.8), rng.range(0, Math.PI * 2), null, 1.5));
     stats.scuffs++;
   }
   for (let i = 0; i < stains; i++) {
@@ -198,7 +234,7 @@ export function groundMarks(api, samples, {
     if (!g) continue;
     const w = rng.range(0.7, 2.1);
     quads.push(patch(DECAL.oil, s.x + rng.jit(0.9), g.point.y + 0.010, s.z + rng.jit(0.9),
-      w, w * rng.range(0.7, 1.25), rng.range(0, Math.PI * 2)));
+      w, w * rng.range(0.7, 1.25), rng.range(0, Math.PI * 2), null, 1.35));
     stats.stains++;
   }
 
@@ -244,6 +280,10 @@ export function groundMarks(api, samples, {
     }
   }
 
+  // Every quad has to prove it is lying on something before it is welded into
+  // the batch, because after the merge there is no per-quad identity left to
+  // judge. See seatQuads.
+  stats.decal = seatQuads(api.probe, quads);
   if (quads.length) {
     api.batcher.merge('decal', mergeQuads(quads), api.mats.get('decal'),
       { solid: false, castShadow: false, receiveShadow: false });
@@ -353,6 +393,17 @@ export function contactPatches(api, batcher, { minRadius = 0.11, maxRadius = 1.4
         Math.atan2(m.elements[8], m.elements[10])));
     }
   }
+  /*
+   * NOT seatQuads()'d, deliberately, and this is the one exception.
+   *
+   * A contact patch is written at the BASE OF A PROP, and a prop may be standing
+   * on another prop — a can on a crate, a rag on a pallet. Props are not in the
+   * world BVH, so seatQuads would find nothing under those patches and delete
+   * them: measured, 304 of 2033 patches, 15% of the contact cue that stops
+   * unshadowed litter reading as hovering. The patch cannot be airborne anyway,
+   * because it is derived from a bounding box that FloatSweep has already
+   * guaranteed is resting on something.
+   */
   if (!quads.length) return 0;
   api.batcher.merge('decal', mergeQuads(quads), api.mats.get('decal'),
     { solid: false, castShadow: false, receiveShadow: false });
@@ -360,6 +411,81 @@ export function contactPatches(api, batcher, { minRadius = 0.11, maxRadius = 1.4
 }
 
 /* ------------------------------------------------------------------------- */
+
+/**
+ * THE DECAL CONTACT GUARANTEE.
+ *
+ * WHY THIS EXISTS. FloatSweep skipped the whole `decal` batch with the comment
+ * "decals lie ON the ground". That was an assumption, and in round 9
+ * tools/floatcheck.mjs measured it: EIGHTEEN props-owned decal quads were
+ * hanging in mid-air. A 3.25 x 3.42 m mark 53 cm clear of anything at
+ * (21.2, 1.9, 1.0). A 5.7 x 5.6 m wash 22 cm off the hall roof. Several more out
+ * past the compound wall at y = 11. A decal is drawn with polygonOffset and no
+ * depth write, so one that misses its surface does not fade into anything — it
+ * hangs there as a flat grey rectangle, and from the elevated framing that is
+ * exactly as obvious as a floating plate.
+ *
+ * The check cannot live in FloatSweep, which is where it belongs conceptually,
+ * because by then every quad has been welded into one merged buffer per pass:
+ * the sweep would be judging a 2000-quad blob as a single object, and 60% of a
+ * blob is always in contact. It has to happen HERE, per quad, before the merge.
+ *
+ * Each quad is judged on its own four corners:
+ *   every corner within CONTACT of a real surface   keep
+ *   every corner has ground below at the same depth drop it onto that surface
+ *   otherwise                                      discard
+ * The middle case fixes the millimetre-to-centimetre misses that come from a
+ * survey sample taken at a slightly different height than the quad was written
+ * at. The last case is a quad overhanging a roof edge or a stair void, which no
+ * translation can seat and which has no business being drawn.
+ *
+ * @param {import('../Surfaces.js').SurfaceProbe} probe
+ * @param {THREE.BufferGeometry[]} list quads, filtered IN PLACE
+ * @returns {{checked:number, ok:number, seated:number, dropped:number, worst:number}}
+ */
+export function seatQuads(probe, list) {
+  const out = { checked: 0, ok: 0, seated: 0, dropped: 0, worst: 0 };
+  if (!list?.length || !probe?.ok) return out;
+  const CONTACT = 0.035;
+  const MAX_DROP = 0.9;
+  let w = 0;
+  for (let i = 0; i < list.length; i++) {
+    const g = list[i];
+    const pos = g?.attributes?.position;
+    if (!pos) { list[w++] = g; continue; }
+    out.checked++;
+    const n = pos.count;
+    const step = Math.max(1, Math.floor(n / 8));
+    let sampled = 0, touching = 0, droppable = 0;
+    let deepest = 0, shallowest = Infinity, worst = 0;
+    for (let k = 0; k < n; k += step) {
+      _p.fromBufferAttribute(pos, k);
+      sampled++;
+      if (probe.nearest(_p.x, _p.y, _p.z, CONTACT) < CONTACT) { touching++; continue; }
+      const hit = probe.ground(_p.x, _p.z, _p.y + 0.05);
+      const drop = hit ? _p.y - hit.point.y : Infinity;
+      if (Number.isFinite(drop) && drop > worst) worst = drop;
+      if (drop > 0.002 && drop < MAX_DROP) {
+        droppable++;
+        if (drop > deepest) deepest = drop;
+        if (drop < shallowest) shallowest = drop;
+      }
+    }
+    if (worst > out.worst) out.worst = worst;
+    if (!sampled || touching === sampled) { out.ok++; list[w++] = g; continue; }
+    // Parallel to its surface, merely written at the wrong height: one shift.
+    if (droppable === sampled - touching && deepest - shallowest < 0.05) {
+      g.translate(0, -(deepest - 0.008), 0);
+      out.seated++;
+      list[w++] = g;
+      continue;
+    }
+    g.dispose();
+    out.dropped++;
+  }
+  list.length = w;
+  return out;
+}
 
 /**
  * Local merge that keeps position/normal/uv/colour — decals need nothing else.

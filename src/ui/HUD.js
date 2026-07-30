@@ -2,6 +2,7 @@ import { PLAYER } from '../core/Constants.js';
 import { injectStyle } from './Style.js';
 import { Reticle } from './Reticle.js';
 import { AmmoPanel, VitalsPanel } from './AmmoPanel.js';
+import { GrenadePanel } from './GrenadePanel.js';
 import { Feedback } from './Feedback.js';
 import { KillFeed, Compass } from './KillFeed.js';
 import { PauseMenu } from './PauseMenu.js';
@@ -51,6 +52,7 @@ export class HUD {
     this.feedback = new Feedback(root);
     this.reticle = new Reticle(root);
     this.ammo = new AmmoPanel(root);
+    this.ordnance = new GrenadePanel(root);
     this.vitals = new VitalsPanel(root);
     this.feed = new KillFeed(root);
     this.compass = new Compass(root);
@@ -80,6 +82,14 @@ export class HUD {
       if (e?.headshot) this._lastHead = { actor: e.actor, t: this._t };
     });
 
+    // Blast damage is resolved by the grenade system, not by Ballistics, so it
+    // never raises 'hit:actor'. Without this the player gets no confirmation
+    // that a frag connected — and a grenade with no feedback feels broken even
+    // when it is killing things.
+    bus.on('grenade:hit', (e) => {
+      if (!e?.killed) this.feedback.hitmarker('hit');
+    });
+
     bus.on('actor:death', (e) => {
       this.feedback.hitmarker('kill');
       const w = this.ctx.get('weapons');
@@ -87,7 +97,10 @@ export class HUD {
       this.feed.push({
         killer: e?.killer ?? 'operator',
         victim: e?.actor?.name ?? e?.actor?.displayName ?? 'hostile',
-        weapon: w?.current?.displayName ?? '',
+        // A kill carries the thing that made it; only fall back to whatever is
+        // in the player's hands when the payload does not say. Otherwise a
+        // grenade kill is credited to the rifle you happen to be holding.
+        weapon: e?.weapon?.displayName ?? w?.current?.displayName ?? '',
         headshot,
         byPlayer: e?.byPlayer ?? true,
       });
@@ -147,6 +160,7 @@ export class HUD {
 
     this.reticle.update(Math.max(d, 1 / 240), weapons, player, ctx.camera.fov, this._h);
     this.ammo.update(d, weapons);
+    this.ordnance.update(d, weapons?.grenades);
     this.vitals.update(player, PLAYER.maxHealth);
     this.feedback.update(Math.max(d, 1 / 240), player, PLAYER.maxHealth);
     this.feed.update(d);

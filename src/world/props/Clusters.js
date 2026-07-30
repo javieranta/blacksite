@@ -546,7 +546,29 @@ export function fenceRun(api, x, z, yaw, sections) {
     if (!post) { prev = null; continue; }
     if (prev) {
       const mx = (prev.x + post.x) / 2, mz = (prev.z + post.z) / 2;
-      const my = Math.min(prev.y, post.y);
+      /*
+       * A BAY IS ONLY BUILT ON GROUND THAT IS FLAT ENOUGH TO CARRY IT.
+       *
+       * This used to seat the panel and its two rails at `Math.min(prev.y,
+       * post.y)`, which is fine on a slab and a defect on a slope: the whole bay
+       * is one rigid transform, so on the outfield terrain the high end lifted
+       * clear of the ground by the full height difference between the posts.
+       * tools/floatcheck.mjs found eight of these in round 9 — `prop:fencerail_0`
+       * islands 0.72 to 0.85 m clear of anything, out along the west fence line.
+       * The prop-side sweeps all passed them, because a rail's support test is
+       * AABB overlap against its posts and a long thin diagonal's AABB is mostly
+       * air; that is the same bounding-box lie that has cost this project four
+       * rounds elsewhere.
+       *
+       * A real fence steps its bays on a slope. Until this kit can build a
+       * stepped bay, a bay too steep to seat is simply not built: the post line
+       * survives, which is what a derelict fence looks like anyway. The mean
+       * rather than the minimum halves the residual on everything that is built,
+       * bounding it to 6 cm — under the 8 cm the assertion calls visible.
+       */
+      const step = Math.abs(prev.y - post.y);
+      if (step > 0.12) { prev = post; continue; }
+      const my = (prev.y + post.y) / 2;
       const b = baseMatrix(mx, my, mz, yaw);
       local(api, api.protos.pick('chainPanel', rng) ?? 'chainpanel_0', b, 0, 0, 0);
       local(api, 'fencerail_0', b, 0, 1.98, 0, 0, 0, 0, rng.range(0.9, 1.05));

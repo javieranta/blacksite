@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { PLAYER } from '../core/Constants.js';
 import { WEAPONS, WEAPON_ORDER, buildRecoilPattern } from './WeaponData.js';
+import { Grenades } from './Grenades.js';
 
 /**
  * OWNER: weapons agent.
@@ -16,6 +17,12 @@ import { WEAPONS, WEAPON_ORDER, buildRecoilPattern } from './WeaponData.js';
  *          'weapon:dryfire'{ weapon }
  *          'shell:eject'   { point, velocity, spin, calibre, weapon }
  *   listens: 'weapon:force' { ads, firing }   — the screenshot rig's ?ads / ?fire
+ *   weapons.grenades  : the player's hand-grenade system (src/weapons/Grenades.js)
+ *
+ * GRENADES are owned here rather than registered in main.js: the registration
+ * list belongs to another agent and is frozen, so this system forwards
+ * init/update/fixedUpdate to them. Everything else reaches them through
+ * `ctx.get('weapons').grenades` or the 'grenade:*' events on the bus.
  *
  * FIRE CONTROL is a time accumulator, never a per-frame boolean: `_fireTimer`
  * counts down by dt and a shot *adds* the RPM interval back, so 720 rpm is 720
@@ -78,6 +85,9 @@ export class WeaponSystem {
     this._forced = { ads: false, firing: false };
     this._forcedShots = 0;
 
+    /** Hand grenades. Ticked from this system's own update/fixedUpdate. */
+    this.grenades = new Grenades();
+
     // scratch — _fire allocates only the two event payload vectors
     this._origin = new THREE.Vector3();
     this._dir = new THREE.Vector3();
@@ -110,6 +120,17 @@ export class WeaponSystem {
       if (firing !== undefined) this._forced.firing = !!firing;
       this._forcedShots = 0;
     });
+
+    this.grenades.init(ctx);
+  }
+
+  /** Gameplay tick. Grenade flight is physics, so it belongs at 120Hz. */
+  fixedUpdate(h, ctx) {
+    this.grenades.fixedUpdate(h, ctx);
+  }
+
+  dispose() {
+    this.grenades.dispose();
   }
 
   // ------------------------------------------------------------------ query ---
@@ -197,6 +218,10 @@ export class WeaponSystem {
     // The pattern only resets once the trigger has been off long enough for the
     // muzzle to settle — that is what makes the pattern learnable.
     if (this._sinceFire > 0.35 && this.state.shotIndex > 0) this.state.shotIndex = 0;
+
+    // Grenades poll the same edge-cleared input map, so they have to be ticked
+    // inside the update phase, before `input:flush` wipes the frame's edges.
+    this.grenades.update(dt, ctx);
   }
 
   /** @returns {boolean} true if a round left the barrel */

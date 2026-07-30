@@ -77,6 +77,14 @@ export const RIG = {
    */
   foreGripLocal: new THREE.Vector3(0, 0.016, -0.185),
   buttLocal: new THREE.Vector3(0, 0.062, 0.215),
+  /**
+   * Ejection port, in the hand bone's frame — right of the receiver, level with
+   * the bore, just behind the chamber. Brass is thrown from HERE, not from the
+   * muzzle; see the note in Combatant._shoot.
+   */
+  ejectLocal: new THREE.Vector3(0.040, 0.082, -0.028),
+  /** And thrown out to the shooter's right, up a little, and slightly back. */
+  ejectDir: new THREE.Vector3(0.86, 0.40, 0.32),
   sightLocal: new THREE.Vector3(0, 0.148, -0.085),
   upperArm: 0.285,
   foreArm: 0.265,
@@ -128,14 +136,37 @@ export const HITBOXES = [
 export const KIT = {
   smock:    [1.10, 1.09, 1.06],
   trouser:  [0.86, 0.87, 0.88],
-  helmet:   [1.62, 1.60, 1.46],
+  /**
+   * The helmet was 1.62 — the highest value on the figure by a wide margin, on a
+   * shell that is also the largest single unbroken area. Against a night rig that
+   * is what makes a man read as "a pale, high-value figure while every surface
+   * around him sits in deep night blue": his brightest, biggest facet is 25%
+   * lighter than anything he is standing near. Pulled down so the helmet is still
+   * the lightest piece of KIT but no longer competes with lit concrete.
+   */
+  helmet:   [1.30, 1.29, 1.20],
   earcup:   [0.86, 0.88, 0.92],
   webbing:  [1.34, 1.28, 1.10],
   yoke:     [1.24, 1.20, 1.06],
   carrier:  [0.66, 0.70, 0.72],
   pouch:    [1.16, 1.02, 0.80],
   pad:      [0.62, 0.64, 0.68],
-  glove:    [1.42, 1.36, 1.22],
+  /**
+   * THE GLOVES ARE NOW THE LIGHTEST THING ON THE MAN, and that is the fix for
+   * "the arms terminate in the weapon".
+   *
+   * Measured: at 7 m a combatant is 220 px tall, which is 8 mm per pixel, so a
+   * 90 mm hand is eleven pixels across — about 130 px of area. The harness says
+   * 170-370 px of glove survive into the frame across both hands, i.e. the
+   * geometry is very nearly all visible already. Nothing was missing. What was
+   * missing was CONTRAST: a twelve-pixel blob at 0.15 albedo, between a 0.19
+   * albedo sleeve and a 0.06 albedo receiver, is a smudge, and a smudge is
+   * exactly what a reviewer describes as "no hands". At this size the only cue
+   * that survives is value, so the glove has to be the brightest thing in the
+   * region. 2.05 on a gear tone of 0.10-0.17 lands at 0.21-0.35 albedo, which is
+   * a light coyote nomex glove and is physically ordinary.
+   */
+  glove:    [2.05, 1.98, 1.88],
   boot:     [0.54, 0.55, 0.58],
   belt:     [0.92, 0.90, 0.84],
   skin:     [1.00, 1.00, 1.00],
@@ -235,6 +266,31 @@ class Skinner {
     for (const f of MATERIAL_ORDER) {
       this.groups.set(f, { pos: [], nrm: [], uv: [], col: [], si: [], sw: [], idx: [], verts: 0, tris: 0 });
     }
+    /**
+     * Named index ranges inside a family, so a harness can render one sub-part
+     * of a merged mesh on its own.
+     *
+     * This exists because of the hands. "Are the hands on the weapon" is a
+     * question about pixels, and there was no way to ask it: the gloves are
+     * merged into the shared `gear` mesh along with the helmet, carrier, pouches
+     * and boots, so nothing could isolate them. `setDrawRange` can — but only
+     * over ONE contiguous span, which is why buildSoldierTemplate() now emits the
+     * gloves before any other `gear` part. tools/aicheck.mjs uses
+     *   geometry.setDrawRange(0, ranges.glove.count)              -> hands only
+     *   geometry.setDrawRange(ranges.glove.count, rest)           -> no hands
+     * and diffs the two against the real frame. Zero runtime cost: it is a pair
+     * of integers recorded at build time.
+     */
+    this.ranges = {};
+  }
+
+  /** Record the index range that `fn` appends to `family`. */
+  mark(family, name, fn) {
+    const G = this.groups.get(family);
+    const start = G.idx.length;
+    fn();
+    this.ranges[name] = { family, start, count: G.idx.length - start };
+    return this;
   }
 
   /**
@@ -277,7 +333,7 @@ class Skinner {
   }
 
   finish() {
-    const out = {};
+    const out = { __ranges: this.ranges };
     let tris = 0;
     for (const [family, G] of this.groups) {
       if (!G.verts) continue;
@@ -389,22 +445,79 @@ function buildArms(s) {
     s.add('gear', tube(0.048, 0.046, 0.050, x, yW + 0.020, 0, 'y', 10), aFo,
       { uv: 2, tint: KIT.webbing });
   }
-  buildFiringHand(s);
-  buildSupportHand(s);
+  // The hands are emitted first, from buildSoldierTemplate — see the note there.
 }
 
 /**
- * One finger: two capsule segments so it curls instead of poking straight out,
- * plus a knuckle sphere at the proximal joint.
+ * One finger, as ONE CONTINUOUS SURFACE swept through the three joints.
  *
- * The knuckle is not decoration. At 4 m a bare capsule pair is two smooth tubes
- * and the hand reads as a mitten; the row of knuckles is the single feature that
- * says "fingers wrapped round something". It costs 42 triangles a finger.
+ * It used to be two capsules plus a knuckle sphere: three closed solids per
+ * finger, thirty per pair of hands. The viewmodel agent measured the consequence
+ * of exactly that construction on the first-person hand and it is worth quoting,
+ * because it is the same geometry and therefore the same defect — the hand mask
+ * came back with "120 connected components where a hand has one", and the review
+ * called it "a stack of unskinned PVC capsules … visible gaps beside the grip …
+ * every joint capped by a teal ring".
+ *
+ * Both symptoms follow from the closed solids. Two capsules meeting at a bent
+ * joint interpenetrate on the inside of the bend and GAP on the outside, so the
+ * finger comes apart exactly where the eye looks for articulation; and every cap
+ * is a ring of near-silhouette normals, which is precisely the geometry a Fresnel
+ * rim term lights hardest — hence a bright ring at every joint rather than along
+ * the finger.
+ *
+ * A tube lofted along a Catmull-Rom through the same three joints has no internal
+ * caps and cannot gap, because there is no seam between the phalanges to come
+ * apart. The taper is applied per ring rather than per segment, so the finger
+ * still narrows from knuckle to tip, and the only cap left is the fingertip —
+ * where a rounded end is correct anatomy. ~90 triangles a finger, against ~110
+ * for the three solids it replaces.
  */
-function finger(s, bone, ax, ay, az, mx, my, mz, bx, by, bz, r = 0.0108) {
-  s.add('gear', limb(ax, ay, az, mx, my, mz, r, r * 0.94, 6), bone, { uv: 3.0, tint: KIT.glove });
-  s.add('gear', limb(mx, my, mz, bx, by, bz, r * 0.94, r * 0.82, 6), bone, { uv: 3.0, tint: KIT.glove });
-  s.add('gear', blob(r * 1.28, ax, ay, az, 1, 1, 1, 6), bone, { uv: 3.0, tint: KIT.glove });
+const _dc = new THREE.Vector3();
+const _dv = new THREE.Vector3();
+function digit(ax, ay, az, mx, my, mz, bx, by, bz, rA, rB, radial = 6, seg = 6) {
+  const curve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(ax, ay, az),
+    new THREE.Vector3(mx, my, mz),
+    new THREE.Vector3(bx, by, bz),
+  ]);
+  const g = new THREE.TubeGeometry(curve, seg, rA, radial, false);
+  // TubeGeometry lays out (seg+1) rings of (radial+1) vertices and places ring i
+  // at curve.getPointAt(i / seg), so the taper can be applied by pulling each
+  // ring toward its own centre. Same parameterisation, so the centres are exact.
+  const pos = g.attributes.position;
+  const ring = radial + 1;
+  for (let i = 0; i <= seg; i++) {
+    const t = i / seg;
+    curve.getPointAt(t, _dc);
+    /**
+     * Knuckle as DISPLACEMENT, not as a bolted-on sphere.
+     *
+     * The sphere this replaces was there for a good reason — at 4 m a smooth tube
+     * reads as a mitten and the row of knuckles is what says "fingers wrapped
+     * round something" — but a sphere at a joint is another closed solid and
+     * another silhouette ring for the rim to catch. A gaussian bulge in the radius
+     * profile near the proximal end gives the same relief on the one surface, so
+     * it adds shading without adding an outline.
+     */
+    const knuckle = 1 + 0.24 * Math.exp(-(((t - 0.10) / 0.16) ** 2));
+    const f = ((rA + (rB - rA) * t) / rA) * knuckle;
+    for (let j = 0; j < ring; j++) {
+      const k = i * ring + j;
+      _dv.fromBufferAttribute(pos, k).sub(_dc).multiplyScalar(f).add(_dc);
+      pos.setXYZ(k, _dv.x, _dv.y, _dv.z);
+    }
+  }
+  g.computeVertexNormals();
+  return g;
+}
+
+function finger(s, bone, ax, ay, az, mx, my, mz, bx, by, bz, r = 0.0132) {
+  s.add('gear', digit(ax, ay, az, mx, my, mz, bx, by, bz, r, r * 0.80), bone,
+    { uv: 3.0, tint: KIT.glove });
+  // The fingertip is the one place a cap belongs. Concentric with the tube's last
+  // ring, so it cannot separate from it.
+  s.add('gear', blob(r * 0.80, bx, by, bz, 1, 1, 1, 6), bone, { uv: 3.0, tint: KIT.glove });
 }
 
 /**
@@ -428,38 +541,55 @@ function buildFiringHand(s) {
   const front = gz + 0.012;      // finger centreline, just clear of the frontstrap
   const back = gz + 0.078;
 
-  // Palm heel wrapping the outboard face of the grip.
-  s.add('gear', taperY(blob(0.046, gx + 0.024, gy - 0.022, gz + 0.050, 0.64, 1.30, 1.05, 10), 0.92, 1.0,
-    gx + 0.024, gz + 0.050), H, { uv: 2.2, tint: KIT.glove });
+  // Palm heel wrapping the outboard face of the grip. Its outer surface reaches
+  // gx+0.055, which is 24 mm proud of the receiver's own gx+0.031 — the back of
+  // the hand is the near-side mass, and it must not be inside the gun.
+  s.add('gear', taperY(blob(0.050, gx + 0.026, gy - 0.022, gz + 0.050, 0.68, 1.30, 1.08, 10), 0.92, 1.0,
+    gx + 0.026, gz + 0.050), H, { uv: 2.2, tint: KIT.glove });
   // Web of the thumb, filling the corner behind the backstrap.
-  s.add('gear', blob(0.031, gx + 0.014, gy + 0.004, back + 0.004, 1.05, 0.90, 0.95, 10), H,
+  s.add('gear', blob(0.034, gx + 0.016, gy + 0.004, back + 0.004, 1.05, 0.90, 0.95, 10), H,
     { uv: 2.2, tint: KIT.glove });
-  // Knuckle armour on the back of the hand — the one hard, dark element on an
-  // otherwise pale glove, so the hand still has an internal edge.
-  s.add('gear', box(0.021, 0.074, 0.060, gx + 0.037, gy - 0.014, gz + 0.044, 0.10, 0, 0.12, 2), H,
-    { uv: 2.6, tint: KIT.pad });
+  /**
+   * Back-of-hand plate. This used to be KIT.pad — 0.62, the darkest value on the
+   * figure — laid across the largest face of the glove. At eleven pixels across
+   * that is not "an internal edge", it is most of the hand painted the same value
+   * as the weapon behind it, which is precisely why the hand stopped reading.
+   * Mid-value webbing keeps a break in the surface without eating the contrast.
+   */
+  s.add('gear', box(0.022, 0.076, 0.062, gx + 0.040, gy - 0.014, gz + 0.044, 0.10, 0, 0.12, 2), H,
+    { uv: 2.6, tint: KIT.webbing });
+  /**
+   * Wrist cuff. The arm and the hand are the same family and, at range, nearly
+   * the same value, so there was no visual event at the wrist and the limb read
+   * as one continuous tube that happened to end at the gun. A pale cuff ring is a
+   * hard horizontal break at exactly the joint a viewer looks for.
+   */
+  s.add('gear', tube(0.040, 0.036, 0.030, gx + 0.010, gy + 0.028, gz + 0.062, 'y', 10), H,
+    { uv: 2.4, tint: KIT.glove });
 
   // Three fingers curled round the frontstrap, plus the index on the trigger.
-  const rows = [[-0.026, 0.0112], [-0.050, 0.0110], [-0.072, 0.0098]];
+  const rows = [[-0.026, 0.0136], [-0.052, 0.0132], [-0.076, 0.0118]];
   for (const [dy, r] of rows) {
     finger(s, H,
-      gx + 0.026, gy + dy + 0.004, gz + 0.044,     // knuckle, on the grip's side
+      gx + 0.030, gy + dy + 0.004, gz + 0.044,     // knuckle, proud of the grip
       gx + 0.014, gy + dy, front,                  // mid joint, round the front
-      gx - 0.018, gy + dy - 0.004, front + 0.006,  // tip, inboard
+      gx - 0.020, gy + dy - 0.004, front + 0.006,  // tip, inboard
       r);
   }
   // Trigger finger: forward off the grip into the trigger guard at z = gz-0.010.
   finger(s, H,
-    gx + 0.026, gy - 0.002, gz + 0.040,
-    gx + 0.016, gy - 0.004, gz + 0.006,
-    gx + 0.002, gy + 0.002, gz - 0.014,
-    0.0114);
-  // Thumb, laid over the top of the backstrap toward the safety.
+    gx + 0.030, gy - 0.002, gz + 0.040,
+    gx + 0.018, gy - 0.004, gz + 0.006,
+    gx + 0.002, gy + 0.002, gz - 0.016,
+    0.0138);
+  // Thumb, laid over the top of the backstrap toward the safety. It crosses the
+  // receiver's top line, which is the one hand shape that is unambiguous in
+  // silhouette from the side.
   finger(s, H,
-    gx + 0.024, gy + 0.014, back,
-    gx + 0.006, gy + 0.020, back - 0.018,
-    gx - 0.014, gy + 0.018, back - 0.040,
-    0.0130);
+    gx + 0.028, gy + 0.016, back,
+    gx + 0.006, gy + 0.026, back - 0.020,
+    gx - 0.016, gy + 0.024, back - 0.044,
+    0.0152);
 }
 
 /**
@@ -480,28 +610,39 @@ function buildSupportHand(s) {
   // spans x ±0.015, y ±0.041, z ±0.018. The fist closes around it in XZ.
   const fz = oz - 0.028;          // finger centreline, forward of the post
 
-  s.add('gear', taperY(blob(0.045, ox - 0.021, oy + 0.002, oz + 0.004, 0.72, 1.16, 1.02, 10), 0.94, 1.0,
-    ox - 0.021, oz + 0.004), H, { uv: 2.2, tint: KIT.glove });
-  s.add('gear', blob(0.029, ox - 0.012, oy + 0.030, oz + 0.012, 1.0, 0.88, 0.95, 10), H,
+  s.add('gear', taperY(blob(0.049, ox - 0.023, oy + 0.002, oz + 0.004, 0.76, 1.16, 1.04, 10), 0.94, 1.0,
+    ox - 0.023, oz + 0.004), H, { uv: 2.2, tint: KIT.glove });
+  s.add('gear', blob(0.032, ox - 0.012, oy + 0.032, oz + 0.012, 1.0, 0.88, 0.95, 10), H,
     { uv: 2.2, tint: KIT.glove });
-  s.add('gear', box(0.020, 0.072, 0.054, ox - 0.035, oy - 0.004, oz - 0.004, 0.08, 0, -0.10, 2), H,
-    { uv: 2.6, tint: KIT.pad });
+  // Mid-value, not KIT.pad — same reasoning as the firing hand's back plate.
+  s.add('gear', box(0.021, 0.074, 0.056, ox - 0.038, oy - 0.004, oz - 0.004, 0.08, 0, -0.10, 2), H,
+    { uv: 2.6, tint: KIT.webbing });
+  // Wrist cuff, breaking the forearm from the fist.
+  s.add('gear', tube(0.038, 0.034, 0.030, ox - 0.012, oy - 0.030, oz + 0.014, 'y', 10), H,
+    { uv: 2.4, tint: KIT.glove });
 
-  const rows = [[0.016, 0.0112], [-0.006, 0.0110], [-0.028, 0.0102], [-0.048, 0.0092]];
+  /**
+   * The fingers wrap the front of the post and their tips reach past it to the
+   * rifle's RIGHT (+x local), which is the near side for a camera on the man's
+   * firing flank. That matters: the handguard is 56 mm wide and the foregrip post
+   * 30 mm, so a fist whose mass sits only on the left of the post is entirely
+   * behind the weapon from the side and contributes nothing.
+   */
+  const rows = [[0.018, 0.0136], [-0.006, 0.0134], [-0.030, 0.0124], [-0.052, 0.0112]];
   for (const [dy, r] of rows) {
     finger(s, H,
-      ox - 0.024, oy + dy, oz - 0.010,
+      ox - 0.026, oy + dy, oz - 0.010,
       ox - 0.006, oy + dy - 0.002, fz,
-      ox + 0.020, oy + dy - 0.006, fz + 0.006,
+      ox + 0.026, oy + dy - 0.006, fz + 0.008,
       r);
   }
   // Thumb over the top of the post, pointing down the bore — the support-hand
   // thumb-forward grip every modern carbine manual teaches.
   finger(s, H,
-    ox - 0.018, oy + 0.028, oz - 0.006,
-    ox - 0.004, oy + 0.034, oz - 0.030,
-    ox + 0.012, oy + 0.032, oz - 0.054,
-    0.0130);
+    ox - 0.020, oy + 0.030, oz - 0.006,
+    ox - 0.002, oy + 0.038, oz - 0.032,
+    ox + 0.018, oy + 0.036, oz - 0.058,
+    0.0150);
 }
 
 function buildLegs(s) {
@@ -665,6 +806,17 @@ function buildRifle(s) {
 export function buildSoldierTemplate() {
   const t0 = performance.now();
   const s = new Skinner();
+  /**
+   * THE GLOVES GO FIRST, and the order is load-bearing.
+   *
+   * They are the head of the `gear` index buffer so that `setDrawRange(0, n)`
+   * renders the hands alone and `setDrawRange(n, rest)` renders everything but
+   * the hands. That is the only way to ask, in pixels, whether the hands are on
+   * the weapon — see Skinner.ranges. Nothing else depends on family ordering:
+   * the parts are merged into one buffer and drawn in a single call, so moving
+   * them changes no visual result.
+   */
+  s.mark('gear', 'glove', () => { buildFiringHand(s); buildSupportHand(s); });
   buildTorso(s);
   buildCarrier(s);
   buildArms(s);
@@ -672,10 +824,13 @@ export function buildSoldierTemplate() {
   buildHead(s);
   buildRifle(s);
   const geometries = s.finish();
+  const ranges = geometries.__ranges;
+  delete geometries.__ranges;
 
   const boneInverses = BIND.map((p) => new THREE.Matrix4().makeTranslation(-p.x, -p.y, -p.z));
   return {
     geometries,
+    ranges,
     boneInverses,
     tris: geometries.__tris,
     buildMs: Math.round(performance.now() - t0),

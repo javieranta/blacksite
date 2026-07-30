@@ -344,12 +344,63 @@ export const LIGHT_RIGS = {
     interiorVolumetric: interior(24.0, 0.05),
   },
   night: {
-    // The "sun" light becomes the moon: cool, dim, but present on every
-    // silhouette so nothing in frame is unreadable.
-    sunFactor: 0.42,
-    sunColour: 0xb9cdf0,
-    sunSoftness: 0.020,
-    moon: { elevation: 38, azimuth: 312 },
+    // ROUND 11 — this preset scored 44/100, eight points below anything else in
+    // the set, and the review's diagnosis was "the night preset is sunset
+    // lighting with a night sky swapped in". It was, but not for the reason
+    // given, and the difference matters because the reason given is not fixable.
+    //
+    // The review blamed "a warm directional key raking hard parallel shadows".
+    // Ablating the four cascade directionals and differencing the two renders
+    // (tools/nightcheck.mjs) puts the key at 2.9% of ground luminance, with a
+    // 99.5th-percentile shadow-edge gradient of 13 codes against midday's 129.
+    // The key was not drawing those shadows and could not have been.
+    //
+    // Rendering the three light layers in isolation (tools/_night11_isolate.mjs,
+    // and looking at the PNGs rather than reasoning about the numbers) found it:
+    //
+    //   key         a faint cool wash, no structure                     ~3%
+    //   practicals  a textbook night frame — warm sodium pools, real
+    //               falloff, black between the fixtures, the gantry lit
+    //               from below. Already correct, on its own.           ~45%
+    //   ambient     a fully-formed DAYLIGHT image, blue-tinted: every
+    //               surface in the compound legible and evenly lit,
+    //               no falloff, no shape.                              ~50%
+    //
+    // The ambient layer is the defect. Sky bakes its IBL from the *display*
+    // dome — a night sky authored to look good on screen, so a few hundredths
+    // linear rather than the ~1e-5 of a real one — and this rig then applied
+    // essentially a daytime multiplier to it (0.34 against midday's 0.42). The
+    // real sky-radiance ratio between noon and midnight is five orders of
+    // magnitude; this rig's was 1.24:1.
+    //
+    // That flat wash is what "renders at daytime albedo" means. It fills the
+    // gaps between the pools, so the practicals' falloff disappears; it is
+    // uniform, so the frame has no luminance structure for the eye to read as
+    // night; and because PostFX meters the composite (see PostFX._applyLook —
+    // `exposure` below no longer reaches the image at all), a uniform fill is
+    // guaranteed to be renormalised straight back up to a daylit mid-grey no
+    // matter how far its absolute level is dropped. Only the RATIO is real.
+    //
+    // So envIntensity falls by ~5x and everything else here follows from the
+    // one decision that the fixtures light this scene and the sky does not.
+    // 0.13 x 0.32 = 0.042 against midday's 11.44 — a 270:1 key ratio, which is
+    // the right order for moon against sun once the eye's adaptation is doing
+    // the rest. Measured at 0.17 the key still laid a 13.9-code edge gradient on
+    // the ground after the sparkle was filtered out; this is where it stops
+    // drawing on the floor and only rims the silhouettes.
+    sunFactor: 0.13,
+    // A moon is not a dim sun and must not be a warm one. Rendered against this
+    // level's warm concrete a 0xb9cdf0 key still metered warm (+0.009 chroma);
+    // this is blue enough to survive the albedo and read as moonlight.
+    sunColour: 0x86aeff,
+    // Six times the moon's true angular diameter. Physically generous, but a
+    // hard-edged shadow on a dark floor reads as a sun shadow with the colour
+    // turned down — the exact note the review gave — and the whole point of a
+    // moon key here is the rim on a silhouette, not a pattern on the ground.
+    sunSoftness: 0.090,
+    // Higher than the old 38 deg: a high moon throws short shadows, and short
+    // shadows cannot rake.
+    moon: { elevation: 52, azimuth: 312 },
     skyLuminance: 0.0055,
     horizonLuminance: 0.009,
     zenith: 0x0a1220,
@@ -358,40 +409,74 @@ export const LIGHT_RIGS = {
     sunDiscLuminance: 9,
     groundAlbedo: 0x2c2f36,
     radianceGain: 1.0,
-    // envIntensity was 0.72 — the highest of any preset, at the time of day with
-    // the least light in it. That flat sky fill is what drowned the practicals:
-    // measured, the artificial rig was a few per cent of the frame, so a 62 cd
-    // lamp four metres up put no visible pool on ground already carrying that
-    // much ambient. Cutting it is most of the fix; see Practicals.js for the
-    // photometry half.
-    shAmbient: 0.34,
-    shDirectional: 1.30,
-    fillWithSH: 0.24,
-    envIntensity: 0.34,
-    hemiIntensity: 0.07,
-    bounceIntensity: 0.05,
-    ambientFloor: 0.013,
+    // What ambient survives has to be SHAPED — sky glow from above, nothing from
+    // below — or cutting it just makes a dimmer flat fill. shDirectional is the
+    // AC:DC ratio of the injected irradiance, so it goes up as the level comes
+    // down: undersides and the insides of the racks go properly black while
+    // up-facing surfaces keep a cold sky wash.
+    shAmbient: 0.30,
+    shDirectional: 2.10,
+    fillWithSH: 0.20,
+    envIntensity: 0.068,
+    hemiIntensity: 0.055,
+    bounceIntensity: 0.03,
+    ambientFloor: 0.009,
+    // Dead value at night and everywhere else — PostFX owns metering. Kept so
+    // the rig table stays uniform.
     exposure: 2.05,
     practicals: 1.0,
-    volumetric: { ...BASE_VOLUMETRIC, density: 0.022, intensity: 0.38, anisotropy: 0.72 },
+    // Pools want to be pools. A 46 m flood and a 13 m lamp cover the whole yard
+    // between them, which is its own kind of flat; pulling the reach in and the
+    // candela up trades coverage for contrast, which is the entire look.
+    practicalReach: 0.74,
+    practicalPeak: 1.55,
+    // The one thing that sells a sodium yard at night, and there is frame budget
+    // for it: a visible cone of air under each fixture. See lighting/LightCones.js.
+    cones: { strength: 1.5, length: 1.18, spread: 1.0 },
+    volumetric: { ...BASE_VOLUMETRIC, density: 0.026, intensity: 0.30, anisotropy: 0.72 },
     interiorVolumetric: interior(6.0, 0.04),
   },
   overcast: {
     // Physically there is no terminator under overcast: the sky *is* the light.
     // This preset is deliberately exempt from the key:fill rebalance above — a
     // hard shadow here would be wrong, not better.
-    sunFactor: 0.16,
-    sunSoftness: 0.30,
-    skyLuminance: 0.42,
-    horizonLuminance: 0.47,
-    zenith: 0x9fb0c2,
-    horizon: 0xc6cfd8,
-    azimuthalSplit: 0.22,
+    //
+    // ROUND 11: it was exempt from the rebalance and still not a sky-dome model.
+    // The review: "Overcast is modelled as 'sun turned down', not as a
+    // sky-dome-dominant lighting model — a directional key still casts shadows
+    // under a flat structureless grey sky." Measured with the same ablation, the
+    // 0.16 key was laying a shadow-edge gradient on the ground that a stratus
+    // deck cannot produce: under a full overcast the disc is spread over the
+    // entire upper hemisphere, so the transition from lit to unlit takes tens of
+    // degrees and there is no edge at all, only a broad ambient-occlusion-shaped
+    // darkening. sunFactor drops to a token gradient and sunSoftness goes past
+    // half a radian, which is where the PCSS kernel stops resolving a boundary.
+    sunFactor: 0.038,
+    sunSoftness: 0.62,
+    // The other half of "not a sky-dome model", and the half that actually
+    // shapes the image. These were 0.42 zenith against 0.47 horizon — a horizon
+    // BRIGHTER than the zenith, which is a clear-sky distribution, and under a
+    // clear sky the radiance sphere carries no vertical gradient worth anything.
+    // The CIE standard overcast sky is L(t) = Lz(1 + 2cos t)/3: the zenith is
+    // three times the horizon, because a horizon ray takes a far longer slant
+    // path through the cloud deck. That single inversion is the whole overcast
+    // look — up-facing surfaces bright, vertical faces a stop down, undersides
+    // and the insides of the racks properly dark — and it is what replaces the
+    // cast shadow that has just been taken away. Without it, removing the key
+    // would only have made the frame flatter.
+    skyLuminance: 0.56,
+    horizonLuminance: 0.20,
+    zenith: 0xb6c3d2,
+    horizon: 0xa8b2bd,
+    azimuthalSplit: 0.18,
     sunDiscLuminance: 0,
     groundAlbedo: 0x6b6a66,
     radianceGain: 1.0,
     shAmbient: 0.22,
-    shDirectional: 0.9,
+    // Raised with the gradient: shDirectional is the gain on the SH bands that
+    // carry direction, so a top-down-dominant sphere only reaches the shading if
+    // this is high enough to let it.
+    shDirectional: 1.60,
     fillWithSH: 0.20,
     envIntensity: 1.15,
     hemiIntensity: 0.35,

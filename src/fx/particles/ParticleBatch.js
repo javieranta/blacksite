@@ -145,6 +145,13 @@ void main() {
 }
 `;
 
+/**
+ * Vertical speed after a bounce, and remaining tangential speed, below which a
+ * bouncing particle is considered at rest. See the settle branch in `simulate`.
+ */
+const REST_VY = 0.42;
+const REST_TANGENTIAL = 0.55;
+
 /** Scratch descriptor: `Particles` fills this and calls push(). No garbage. */
 export function makeDescriptor() {
   return {
@@ -302,6 +309,40 @@ export class ParticleBatch {
     return true;
   }
 
+  /**
+   * Retire the oldest particles carrying `tile` until at most `keep` remain.
+   *
+   * Exists because a magazine of brass at a 0.085 s cyclic rate and a 1.7 s life
+   * is twenty casings alive at once, and the failing build measured 28 — a fan of
+   * brass 3.5 m wide beside the player, several of them in frame together, which
+   * reads as a shell dispenser rather than a rifle. Capping by AGE rather than by
+   * refusing the newest keeps the fresh case, which is the one the player is
+   * looking at.
+   *
+   * A flat scan and a swap-remove per eviction: no allocation, and the excess is
+   * normally zero or one, so this is one pass over a few hundred floats.
+   *
+   * @param {number} tile sprite tile index to count (aP.x)
+   * @param {number} keep maximum to leave alive
+   */
+  retireOldest(tile, keep) {
+    for (;;) {
+      let live = 0;
+      let oldest = -1;
+      let oldestAge = -1;
+      for (let i = 0; i < this.count; i++) {
+        if (this.aP[i * 4] !== tile) continue;
+        live++;
+        if (this.age[i] > oldestAge) { oldestAge = this.age[i]; oldest = i; }
+      }
+      if (live <= keep || oldest < 0) return;
+      const n = this.count - 1;
+      if (oldest !== n) this._move(oldest, n);
+      this.count = n;
+      this._staticDirty = true;
+    }
+  }
+
   /** Moves the particle at `from` into `to`. Flat copies, no branching. */
   _move(to, from) {
     cw(this.aPos, to, from, 3); cw(this.aVel, to, from, 3);
@@ -369,6 +410,16 @@ export class ParticleBatch {
         if (vy < 0) vy = -vy * b;
         vx *= 0.62; vz *= 0.62;
         spin[i] *= 0.45;
+        // SETTLE. Without this a case with 0.24 restitution keeps taking
+        // millimetre hops and keeps spinning for the rest of its life, which on
+        // screen is jitter — the one thing that tells you an object has no mass.
+        // Once the hop is spent, stop integrating it entirely: park the case flat,
+        // kill the roll, and zero its gravity so nothing wakes it again.
+        if (vy < REST_VY && Math.abs(vx) + Math.abs(vz) < REST_TANGENTIAL) {
+          vx = 0; vy = 0; vz = 0;
+          spin[i] = 0;
+          this.grav[i] = 0;
+        }
       }
 
       pos[i3] = x; pos[i3 + 1] = y; pos[i3 + 2] = z;
