@@ -285,6 +285,30 @@ export const HUD_CSS = `
   color: var(--steel); text-transform: uppercase;
 }
 #hud .bs-menu-diag i { width: 3px; height: 3px; background: var(--amber); opacity: .7; }
+
+/* Performance readout (F3, or ?perf=1). Top-left, out of the way of the
+   compass and the kill feed. Tabular figures so the numbers do not jitter
+   sideways as they change. */
+#hud .hud-perf {
+  position: absolute; left: 18px; top: 16px;
+  display: flex; align-items: baseline; gap: 5px;
+  font-family: var(--f-num); font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  font-size: 13px; letter-spacing: .06em;
+  padding: 6px 11px; background: rgba(10, 13, 18, .46);
+  border-left: 2px solid var(--steel);
+}
+#hud .hud-perf .v { color: var(--bone); min-width: 2.2em; text-align: right; }
+#hud .hud-perf .u {
+  font-size: 8px; letter-spacing: .2em; text-transform: uppercase;
+  color: var(--steel); margin-right: 7px;
+}
+#hud .hud-perf .v.dim { color: var(--steel-hi); font-size: 11px; }
+#hud .hud-perf .u.dim { opacity: .7; }
+#hud .hud-perf.good { border-left-color: #6fa86f; }
+#hud .hud-perf.warn { border-left-color: var(--amber); }
+#hud .hud-perf.bad  { border-left-color: #c1553f; }
+#hud .hud-perf.bad .v[data-k="fps"] { color: #e07a62; }
 `;
 
 export function injectStyle() {

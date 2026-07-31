@@ -3,6 +3,7 @@ import { Engine } from './core/Engine.js';
 import { Input } from './core/Input.js';
 import { QUALITY, TIME_OF_DAY } from './core/Constants.js';
 import { AdaptiveQuality } from './core/AdaptiveQuality.js';
+import { Warmup } from './core/Warmup.js';
 
 import { MaterialForge } from './render/MaterialForge.js';
 import { Sky } from './render/Sky.js';
@@ -56,6 +57,11 @@ engine.register(new PostFX());          // owns the frame — must be last rende
 // After PostFX: it emits 'render:quality' from init(), and PostFX must already
 // be subscribed for the opening preset to land.
 engine.register(new AdaptiveQuality());  // measures real frame time, moves the preset
+// LAST in the init order, and after AdaptiveQuality specifically: presets toggle
+// effects on and off, which changes the shader permutations, so the preset must
+// be settled before anything is pre-linked. This is what stops the first minute
+// of play being a series of 700ms compile stalls. See src/core/Warmup.js.
+engine.register(new Warmup());
 
 // Clears per-frame input edges after every system has observed them.
 engine.register({

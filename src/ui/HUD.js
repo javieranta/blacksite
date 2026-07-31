@@ -6,6 +6,7 @@ import { GrenadePanel } from './GrenadePanel.js';
 import { Feedback } from './Feedback.js';
 import { KillFeed, Compass } from './KillFeed.js';
 import { PauseMenu } from './PauseMenu.js';
+import { PerfPanel } from './PerfPanel.js';
 
 /**
  * OWNER: ui agent.
@@ -57,6 +58,9 @@ export class HUD {
     this.feed = new KillFeed(root);
     this.compass = new Compass(root);
     this.menu = new PauseMenu(root, ctx);
+    // Frame timing readout — F3, or ?perf=1. See PerfPanel for why it shows
+    // worst-frame and CPU time alongside the average.
+    this.perf = new PerfPanel(root);
 
     this._h = Math.max(1, ctx.renderer.domElement.clientHeight || window.innerHeight);
 
@@ -165,10 +169,12 @@ export class HUD {
     this.feedback.update(Math.max(d, 1 / 240), player, PLAYER.maxHealth);
     this.feed.update(d);
     this.compass.update(player?.yaw ?? 0);
+    this.perf.update(Math.max(d, 1 / 240), ctx.engine?.stats);
   }
 
   dispose() {
     removeEventListener('keydown', this._onKey);
+    this.perf?.dispose();
     this.root?.remove();
   }
 }

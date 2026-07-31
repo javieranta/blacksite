@@ -606,7 +606,9 @@ function buildHand(d) {
   const foreProf = (s, u, gu) => {
     // Gauntlet cuff: a flare over the first 18% of the run, then the sleeve.
     const flare = 1 + 0.185 * Math.sin(Math.PI * Math.min(1, gu / 0.19));
-    const grow = lerp(1.0, 1.62, sstep(0.14, 1.0, gu));
+    // A real sleeved forearm swells markedly from wrist to elbow; 1.62 left it
+    // reading as a tube of constant width under foreshortening.
+    const grow = lerp(1.0, 1.92, sstep(0.14, 1.0, gu));
     return { a: fa * flare * grow, b: fb * flare * grow, n: 2.25, wp: 0 };
   };
   const foreSt = loft(foreJ, 3, foreProf, foreM,
@@ -841,12 +843,24 @@ const LEFT = {
   // (-0.0204, 0.0542) — 9.6 mm clear of the rail web, on the flank the eye sees.
   seeds: [0.0530, 0.0530, 0.0538, 0.0552],
   digitOff: 0.0058,
-  thick: 0.0118, thickStep: 0.0005,
-  palmA: 0.0362, palmB: 0.0094,
+  /**
+   * Bulked for a military build. The player's report was that this hand read as
+   * "super thin", and it was: palmB 0.0094 against the right hand's 0.0122, so
+   * the support hand was measurably shallower than the firing hand on the same
+   * body. Finger thickness only goes up 12% because the clearances documented
+   * above are tight — the rail stub top is at y = 0.041 and the metacarpal heads
+   * ride the shoulder 9.6 mm clear of the rail web — but the palm, wrist and
+   * forearm carry most of the visual mass anyway.
+   */
+  thick: 0.0132, thickStep: 0.0006,
+  palmA: 0.0388, palmB: 0.0128,
   // Wrist below-left of the handguard's lower-left diagonal: outside the section
   // (x < -0.019), below it (y < 0.011), and 6 mm forward of the upper receiver's
   // front face at z = -0.062 so the sleeve never intersects it.
-  wrist: [-0.0255, -0.0095, -0.0790], wristA: 0.0205, wristB: 0.0180,
+  // The forearm inherits this section exactly (see `fa`/`fb` in the build), so
+  // the wrist ellipse sets the whole arm's girth — this is the single number
+  // that makes the arm read as a forearm rather than a wire.
+  wrist: [-0.0255, -0.0095, -0.0790], wristA: 0.0244, wristB: 0.0214,
   palmS0: 0.0030, palmS1: 0.0555,
   trigger: null,
   /**
@@ -859,7 +873,7 @@ const LEFT = {
   thumb: {
     root: [-0.0205, 0.0400, -0.1180], p: [-0.0244, 0.0452, -0.1380],
     dir: [0.05, 0.11, -0.99], back: [-0.90, 0.42, 0.0],
-    len: 0.0224, th: 0.0142, curls: [0.13, 0.12, 0.15],
+    len: 0.0224, th: 0.0156, curls: [0.13, 0.12, 0.15],
   },
   // Down, left and back, off the bottom-left corner of the frame.
   fore: { dir: [-0.60, -0.66, 0.45], bend: [-0.016, -0.010, 0.014], len: 0.3100 },
