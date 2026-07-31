@@ -42,6 +42,18 @@ export const PLAYER = {
   stepHeight: 0.42,
   maxSlope: 0.72,          // cos of max walkable angle
 
+  /**
+   * Ladders. Every caged ladder in the map was geometry only for eleven rounds —
+   * a player stood at the foot of one and could not get up it, and there was no
+   * key that would have helped, because no climb state existed.
+   */
+  ladderReach: 0.62,        // how far off the face the climb volume extends
+  ladderSpeed: 2.6,         // m/s up or down
+  ladderMountDot: 0.30,     // how squarely you must face it to attach
+  ladderTopClear: 0.34,     // height above the stile top that counts as topping out
+  ladderTopPush: 2.4,       // m/s forward shove that puts you on the deck
+  ladderPushOff: 3.4,       // m/s away from the face when you jump off
+
   maxHealth: 100,
   regenDelay: 4.2,
   regenRate: 26,

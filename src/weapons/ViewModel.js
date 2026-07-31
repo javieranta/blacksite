@@ -500,8 +500,16 @@ export class ViewModel {
      * remaining pixel was.
      */
     if (sky.skyColour) {
-      this.vmFill.color.copy(sky.skyColour).lerp(WHITE, 0.70);
-      this.vmRim.color.copy(sky.skyColour).lerp(WHITE, 0.48);
+      /**
+       * Both doses went up one more step when the support forearm was bulked for
+       * realism. A thicker limb presents a WIDER grazing band to the rim, which
+       * is precisely where this artefact lives, so the same tuning that passed on
+       * a thin arm put peak saturation at 0.373 against a 0.34 ceiling — the
+       * count was still fine at 0.166% of 0.4%, so it was the hottest few pixels
+       * on the new forearm's silhouette, not a general regression.
+       */
+      this.vmFill.color.copy(sky.skyColour).lerp(WHITE, 0.82);
+      this.vmRim.color.copy(sky.skyColour).lerp(WHITE, 0.72);
     }
     const amb = sky.preset?.ambient ?? 0.4;
     this.vmFill.intensity = 0.35 + amb * 0.55;
@@ -509,7 +517,14 @@ export class ViewModel {
     // Sky half tracks the preset; ground half stays warm dust at every time of day,
     // because that is what the ground under this level is.
     this.vmWrap.color.copy(this.vmFill.color);
-    this.vmWrap.intensity = 0.20 + amb * 0.48;
+    /**
+     * Raised with the bulked forearm. The residual cyan in ADS is on the DARKEST
+     * hand pixels — the ones lit only by the blue sky probe, which no amount of
+     * desaturating the directional lights can reach, because no directional light
+     * is lighting them. The warm lower hemisphere is the only lever that touches
+     * those, and a thicker arm simply has more surface sitting in that shadow.
+     */
+    this.vmWrap.intensity = 0.28 + amb * 0.62;
   }
 
   update(dt, ctx) {

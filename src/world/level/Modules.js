@@ -585,6 +585,24 @@ export function coping(b, o) {
 /** Caged ladder — vertical circulation that reads at 40m. */
 export function ladder(b, o) {
   const h = o.h, zone = o.zone;
+  /**
+   * Register the climb volume. The rungs were always here as geometry, but
+   * nothing told the player controller they were climbable, so every ladder in
+   * the map was decoration — a player reported standing at the foot of one
+   * unable to get up it, and he was right. `Level` collects these into
+   * `level.ladders` and PlayerController tests the capsule against them.
+   *
+   * `face` is the outward normal of the climbing side: the stiles sit at
+   * x +/- 0.22 in the z plane, so you mount it from +z unless told otherwise.
+   */
+  (b.ladders ??= []).push({
+    x: o.x, y: o.y, z: o.z, h,
+    halfWidth: 0.34,
+    face: o.face ? [o.face[0], o.face[1], o.face[2]] : [0, 0, 1],
+    // Where the player ends up when they top out.
+    topY: o.y + h,
+    zone,
+  });
   for (const s of [-1, 1]) {
     b.geo('metal_painted', tube([[o.x + s * 0.22, o.y, o.z], [o.x + s * 0.22, o.y + h, o.z]], 0.028, 8,
       { segLen: 4 }), null, { zone, tile: 1.0 });

@@ -170,6 +170,25 @@ const ROUTES = [
     jumps: [0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
   },
 
+  /* ---------------------------------------------------------------- ladders */
+  /**
+   * Added after a player stood at the foot of a caged ladder and could not climb
+   * it. Eleven ladders had existed as geometry since round one; nothing had ever
+   * connected them to the controller, and this suite's eighteen routes covered
+   * stairs, ramps and mantles but not one ladder — so the gap was invisible to
+   * the very test built to catch exactly this.
+   */
+  {
+    name: 'perimeter ladder (climb the cage)',
+    pos: '-38.6,1.6,-23.75', yaw: 0, seconds: 6, minGain: 4.0,
+    note: 'mount from the +z face and climb; 7 m run',
+  },
+  {
+    name: 'silo ladder (tall run, 22 m)',
+    pos: '17.6,2.3,50.75', yaw: 0, seconds: 12, minGain: 8.0,
+    note: 'the long one on the silo — proves the climb sustains, not just mounts',
+  },
+
   /* ------------------------------------------------------------------ control */
   {
     name: 'flat ground control (should gain nothing)',

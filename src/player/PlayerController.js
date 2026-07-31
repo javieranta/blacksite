@@ -71,7 +71,12 @@ export class PlayerController {
       sliding: false, mantling: false, ads: false, lean: 0,
       speed: 0, slideT: 0, slideTilt: 0, mantleT: 0,
       crouchAmount: 0, airborneTime: 0,
+      climbing: false,
     };
+    /** The ladder volume currently attached to, or null. */
+    this._ladder = null;
+    /** Blocks instant re-attach after stepping off the top or jumping away. */
+    this._ladderCooldown = 0;
 
     this.collision = new CollisionWorld();
     this.loco = new Locomotion(this.collision);
@@ -230,6 +235,16 @@ export class PlayerController {
 
     if (this.state.mantling) {
       this._updateMantle(h, ctx);
+      this._regen(h);
+      this._updateEye();
+      return;
+    }
+
+    // Ladders take priority over walking: while attached, gravity and the ground
+    // acceleration model are both wrong for what the player is doing.
+    this._ladderCooldown = Math.max(0, this._ladderCooldown - h);
+    if (this.state.climbing || this._tryMountLadder()) {
+      this._updateLadder(h, ctx);
       this._regen(h);
       this._updateEye();
       return;
@@ -560,6 +575,122 @@ export class PlayerController {
     this.velocity.set(0, 0, 0);
     ctx.bus.emit('player:mantle', { position: this._mantleTo.clone(), rise });
     return true;
+  }
+
+  /* ----------------------------------------------------------------- ladders */
+
+  /**
+   * Attach if the capsule is inside a ladder's climb volume and the player is
+   * asking to go at it. Ladders in this map are caged, mounted flat to a wall or
+   * a silo, with the stiles in a plane — so the volume is a box around the stile
+   * line, extended `ladderReach` out along the ladder's face normal.
+   *
+   * Mounting deliberately requires BOTH proximity and intent: you must be
+   * pushing forward and looking roughly at the ladder. Attaching on proximity
+   * alone means brushing past one mid-firefight silently takes gravity away.
+   */
+  _tryMountLadder() {
+    if (this._ladderCooldown > 0) return false;
+    const ladders = this.level?.ladders;
+    if (!ladders || !ladders.length) return false;
+
+    const axis = this.input.moveAxis;
+    if (axis.y <= 0.1) return false;                   // must be pushing forward
+
+    const feet = this.position.y - this.height;
+    for (let i = 0; i < ladders.length; i++) {
+      const L = ladders[i];
+      // Vertically overlapping the run, with a little slack under the bottom rung.
+      if (feet < L.y - 0.6 || feet > L.y + L.h - 0.2) continue;
+
+      const dx = this.position.x - L.x;
+      const dz = this.position.z - L.z;
+      const reach = L.halfWidth + this.radius + PLAYER.ladderReach;
+      if (dx * dx + dz * dz > reach * reach) continue;
+
+      // Facing it: the player's look direction must oppose the face normal.
+      const fx = -Math.sin(this.yaw);
+      const fz = -Math.cos(this.yaw);
+      const toward = -(fx * L.face[0] + fz * L.face[2]);
+      if (toward < PLAYER.ladderMountDot) continue;
+
+      this._ladder = L;
+      this.state.climbing = true;
+      this.state.sliding = false;
+      this.velocity.set(0, 0, 0);
+      this.ctx?.bus.emit('player:ladder', { phase: 'mount', ladder: L });
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * One climb tick. Forward/back on the movement axis drives vertical travel —
+   * which is what every shooter does, because it keeps the same key doing "go
+   * where I am looking". Strafe dismounts sideways, jump pushes off backwards,
+   * and topping out shoves the player forward onto the deck rather than leaving
+   * them hovering at the last rung.
+   */
+  _updateLadder(h, ctx) {
+    const L = this._ladder;
+    if (!L) { this.state.climbing = false; return; }
+
+    const axis = this.input.moveAxis;
+    const st = this.state;
+
+    // Jump detaches, pushing away from the face so you do not immediately remount.
+    if (this._jumpBufferT > 0) {
+      this._jumpBufferT = 0;
+      this.velocity.set(
+        L.face[0] * PLAYER.ladderPushOff, PLAYER.jumpVelocity * 0.62,
+        L.face[2] * PLAYER.ladderPushOff,
+      );
+      return this._dismount(ctx, 'jump');
+    }
+
+    // Climb rate. Looking up while pressing forward climbs; looking down descends,
+    // so the ladder obeys the same "go where I look" rule as walking does.
+    const lookUp = Math.sin(-this.pitch);
+    let vy = axis.y * PLAYER.ladderSpeed * (lookUp >= 0 ? 1 : -1);
+    if (Math.abs(axis.y) < 0.1) vy = 0;
+    this.velocity.set(0, vy, 0);
+    this.position.y += vy * h;
+
+    // Hold the capsule on the ladder's axis, a little off the face.
+    const hold = this.radius * 0.72;
+    this.position.x += ((L.x + L.face[0] * hold) - this.position.x) * Math.min(1, 10 * h);
+    this.position.z += ((L.z + L.face[2] * hold) - this.position.z) * Math.min(1, 10 * h);
+
+    const feet = this.position.y - this.height;
+
+    // Topped out: step forward over the lip onto whatever the ladder serves.
+    if (feet >= L.y + L.h - PLAYER.ladderTopClear && vy > 0) {
+      this.velocity.set(
+        -L.face[0] * PLAYER.ladderTopPush, 1.6, -L.face[2] * PLAYER.ladderTopPush,
+      );
+      return this._dismount(ctx, 'top');
+    }
+
+    // Back on the deck at the bottom.
+    if (feet <= L.y - 0.05 && vy < 0) {
+      this.position.y = L.y + this.height;
+      return this._dismount(ctx, 'bottom');
+    }
+
+    // Strafing off the side lets go.
+    if (Math.abs(axis.x) > 0.7) return this._dismount(ctx, 'strafe');
+
+    st.grounded = false;
+    st.sprinting = false;
+    st.speed = Math.abs(vy);
+  }
+
+  _dismount(ctx, why) {
+    this.state.climbing = false;
+    this._ladder = null;
+    // Long enough that the mount test cannot re-fire on the same key press.
+    this._ladderCooldown = why === 'bottom' ? 0.15 : 0.45;
+    ctx?.bus.emit('player:ladder', { phase: 'dismount', why });
   }
 
   _updateMantle(h, ctx) {

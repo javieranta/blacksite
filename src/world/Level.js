@@ -94,6 +94,13 @@ export class Level {
      *     const clear = ctx.get('level')?.keepClear ?? [];
      */
     this.keepClear = [];
+    /**
+     * Climbable ladder volumes, filled by `ladder()` in level/Modules.js.
+     * PlayerController tests the capsule against these to enter its climb state.
+     * Ladders existed as geometry in eight places for eleven rounds while being
+     * completely unclimbable, because nothing connected the two.
+     */
+    this.ladders = [];
     this.bounds = new THREE.Box3(
       new THREE.Vector3(-44, -4, -28),
       new THREE.Vector3(54, 34, 62),
@@ -128,6 +135,7 @@ export class Level {
       spawnPoints: this.spawnPoints,
       enemySpawns: this.enemySpawns,
       keepClear: this.keepClear,
+      ladders: this.ladders,
     };
     this._declareCirculation();
 
@@ -169,6 +177,10 @@ export class Level {
       this.meshes.push(m);
     }
 
+    // The builder accumulates climb volumes as it lays ladders down; hand them
+    // to the controller now that the geometry they describe actually exists.
+    if (b.ladders?.length) this.ladders.push(...b.ladders);
+
     this._realiseLights(ctx);
 
     if (b.rejected.size) {
@@ -178,7 +190,8 @@ export class Level {
     console.info(
       `[level] Site 9 baked: ${tris.toLocaleString()} tris in ${baked.solid.length + baked.loose.length}`
       + ` meshes (${baked.solid.length} solid), ${this.apertures.length} apertures,`
-      + ` ${this.lightAnchors.length} light anchors, ${Math.round(performance.now() - t0)}ms`,
+      + ` ${this.lightAnchors.length} light anchors, ${this.ladders.length} ladders,`
+      + ` ${Math.round(performance.now() - t0)}ms`,
     );
     console.info('[level] tris by zone:', zones.map(([z, n]) => `${z} ${Math.round(n / 100) / 10}k`).join('  '));
   }

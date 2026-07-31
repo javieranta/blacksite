@@ -598,17 +598,46 @@ function buildHand(d) {
   // A break between the panels: the second half swings a few degrees.
   const bend = new THREE.Vector3(d.fore.bend[0], d.fore.bend[1], d.fore.bend[2]);
   foreJ.push(foreJ[2].clone().addScaledVector(fwd, d.fore.len * 0.38).add(bend));
+  /**
+   * THE ELBOW. Everything above is the forearm; these two stations carry on past
+   * the joint along a steeper vector, so the limb visibly BENDS and then leaves
+   * the frame, instead of running out of it as one straight 31 cm tube. The
+   * profile below narrows at the crease and swells again for the upper arm,
+   * which is what actually reads as a joint rather than a kink in a pipe.
+   */
+  const elbowIdx = foreJ.length - 1;
+  const up = d.fore.upper;
+  if (up) {
+    const uf = new THREE.Vector3(up.dir[0], up.dir[1], up.dir[2]).normalize();
+    foreJ.push(foreJ[elbowIdx].clone().addScaledVector(uf, up.len * 0.42));
+    foreJ.push(foreJ[elbowIdx].clone().addScaledVector(uf, up.len));
+  }
   const foreM = frameAt(IDENT, foreJ[0].x, foreJ[0].y, foreJ[0].z,
     d.fore.dir, [heelBack[0], heelBack[1], heelBack[2]]);
   // The forearm inherits the WRIST section exactly, which is what makes the seam
   // watertight without a cap at either end.
   const fa = d.wristA, fb = d.wristB;
+  /**
+   * Girth follows the actual limb, not a cone. A forearm is narrowest at the
+   * wrist, swells hard through the brachioradialis belly at roughly two thirds,
+   * draws IN at the elbow crease, then swells again for the upper arm. A single
+   * monotonic taper — which is what this was — reads as a cone no matter how
+   * fat you make it, and making it fatter only made it a fatter cone.
+   */
+  const elbowU = up ? 0.62 : 1.0;
   const foreProf = (s, u, gu) => {
     // Gauntlet cuff: a flare over the first 18% of the run, then the sleeve.
     const flare = 1 + 0.185 * Math.sin(Math.PI * Math.min(1, gu / 0.19));
-    // A real sleeved forearm swells markedly from wrist to elbow; 1.62 left it
-    // reading as a tube of constant width under foreshortening.
-    const grow = lerp(1.0, 1.92, sstep(0.14, 1.0, gu));
+    let grow;
+    if (gu <= elbowU) {
+      // wrist -> belly -> slight draw-in as the crease approaches
+      const t = gu / elbowU;
+      grow = lerp(1.0, 2.24, sstep(0.10, 0.72, t)) * lerp(1.0, 0.90, sstep(0.80, 1.0, t));
+    } else {
+      // past the crease: upper arm, heavier again and running off frame
+      const t = (gu - elbowU) / (1 - elbowU);
+      grow = lerp(2.02, 2.62, sstep(0.0, 0.85, t));
+    }
     return { a: fa * flare * grow, b: fb * flare * grow, n: 2.25, wp: 0 };
   };
   const foreSt = loft(foreJ, 3, foreProf, foreM,
@@ -806,7 +835,10 @@ const RIGHT = {
     len: 0.0215, th: 0.0146, curls: [0.30, 0.34, 0.30],
   },
   // Back, down and outboard toward the right shoulder.
-  fore: { dir: [0.30, -0.62, 0.72], bend: [0.010, -0.014, 0.020], len: 0.2500 },
+  fore: {
+    dir: [0.30, -0.62, 0.72], bend: [0.010, -0.014, 0.020], len: 0.2450,
+    upper: { dir: [0.22, -0.90, 0.38], len: 0.1500 },
+  },
 };
 
 /**
@@ -860,7 +892,7 @@ const LEFT = {
   // The forearm inherits this section exactly (see `fa`/`fb` in the build), so
   // the wrist ellipse sets the whole arm's girth — this is the single number
   // that makes the arm read as a forearm rather than a wire.
-  wrist: [-0.0255, -0.0095, -0.0790], wristA: 0.0244, wristB: 0.0214,
+  wrist: [-0.0255, -0.0095, -0.0790], wristA: 0.0264, wristB: 0.0232,
   palmS0: 0.0030, palmS1: 0.0555,
   trigger: null,
   /**
@@ -876,7 +908,20 @@ const LEFT = {
     len: 0.0224, th: 0.0156, curls: [0.13, 0.12, 0.15],
   },
   // Down, left and back, off the bottom-left corner of the frame.
-  fore: { dir: [-0.60, -0.66, 0.45], bend: [-0.016, -0.010, 0.014], len: 0.3100 },
+  /**
+   * A forearm is 25-27 cm from elbow to wrist. This was 0.3100 — longer than
+   * anatomy and 24% longer than the same body's other arm at 0.2500 — and the
+   * original note admits why: the run was made 'long enough to put the elbow
+   * off the edge in every pose'. That works for the firing arm, which points
+   * away from the camera. The support arm crosses the frame diagonally, so
+   * instead of leaving the shot it just read as an implausibly long limb with
+   * no joint in it. Shortened to anatomy, and given a real elbow: `upper` runs
+   * on past the joint at a steeper angle so the arm bends and THEN exits.
+   */
+  fore: {
+    dir: [-0.60, -0.66, 0.45], bend: [-0.016, -0.010, 0.014], len: 0.2450,
+    upper: { dir: [-0.26, -0.89, 0.37], len: 0.1550 },
+  },
 };
 
 /* ------------------------------------------------------------------ build */
