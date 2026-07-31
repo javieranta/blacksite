@@ -1,126 +1,144 @@
 # BLACKSITE — Status
 
-Last assessed after round 6.
+State at parking. Every number here was measured, not estimated; where something
+is unverified it says so.
 
-## Score trajectory
+---
 
-| Round | Score | Verdict | State |
-|---:|---:|---|---|
-| Baseline | 9 | NOT_AAA | 24 unbevelled boxes, flat-fill sky |
-| 2 | 32 | NOT_AAA | Textured industrial compound, greybox weapon |
-| 6 | **54** | **NOT_AAA** | Full gameplay layer, materials competent, lighting broken |
+## Score history
 
-Scoring anchors used by the reviewer: 40 = obvious hobby project · 60 = competent
-indie · 75 = strong stylised game, still clearly not AAA · 85 = genuinely
-mistakable for a AAA frame at a glance · 95 = indistinguishable.
+| Round | Score | What changed |
+|---:|---:|---|
+| baseline | 9 | 24 unbevelled boxes, flat-fill sky |
+| 2 | 32 | Textured industrial compound, greybox weapon |
+| 6 | 54 | ADS regression fixed, combat perf 28→59fps, NaN errors gone |
+| 8 | 58 | **Cast shadows and ambient occlusion finally landed** |
+| 9 | 59 | Hand legibility, optic glass, world-space muzzle light |
+| 10 | **61** | Optic rebuilt (circular tube, turrets, 97% transmission) |
+| 11 | not graded | Traversal, per-weapon viewmodels, grenades — the critic agent died on a session limit |
 
-> **On the grading method.** The reviewer is an agent that sees only rendered
-> PNGs and grades against an explicit checklist of AAA failure modes. It was
-> *not* able to perform a literal blind A/B against real Call of Duty
-> screenshots — no such reference was available to it. Treat 54/100 as a strict
-> proxy measurement, not a measured comparison against the actual target.
+Anchors used by the reviewer: 40 = obvious hobby project · 60 = competent indie ·
+75 = strong stylised game, still clearly not AAA · 85 = mistakable for AAA at a
+glance · 95 = indistinguishable.
 
-## Reviewer's summary
+> **On the grading.** The reviewer is an agent that sees only rendered PNGs and
+> grades against an explicit checklist of AAA failure modes. It never performed a
+> literal blind A/B against real Call of Duty screenshots — no such reference was
+> available to it. Treat 61/100 as a strict proxy, not a measured comparison
+> against the stated target. Rounds 10 and 11 were not graded on the same basis:
+> 11 has no score at all.
 
-> "The prop dressing and rust/metal materials have reached competent-indie level,
-> but the lighting fundamentals are broken: seven of twelve frames are golden
-> hour or dusk with literally zero cast shadows on the ground, and no frame
-> anywhere shows ambient occlusion. A reviewer spots this in well under a second."
+The reviewer's own per-shot split explains where the remaining points are:
 
-**Strongest aspect:** PBR authoring on rusted metal and industrial deck plate.
-The pitted rust on the horizontal pipe in `material-closeup` holds a warm rim
-light from the low sun with correct roughness variation between corroded and
-intact areas — that specific surface pairing would not immediately give itself
-away next to a AAA frame. Prop density and silhouette layering in the courtyard
-views is the runner-up.
+```
+environment-only shots   60-68     (silhouette-dusk 68, material-closeup 66)
+first-person weapon      42-54     (viewmodel-hip 52, combat 46, night 44)
+```
 
-## The single highest-value fix
+The environment reached competent-indie. The viewmodel and the night preset are
+the floor, and hero assets are where a procedural-only approach hits its ceiling.
 
-Per the reviewer, do this before anything else:
+---
 
-> Fix the sun shadow cascade so shadows survive low sun elevations. The shadow
-> pipeline demonstrably works — `hero-midday`, `interior` and `vertical` all render
-> correct directional shadows — so this is not a feature to build, it is a shadow
-> camera whose ortho extents and far plane are sized for a high sun and clip
-> everything away as the sun drops. Fit the shadow camera's light-space AABB to
-> the view frustum each frame, with extents scaled by `1/tan(sunElevation)`.
+## What works, verified
 
-That one change puts real shadows into 7 of 12 frames, including every hero,
-viewmodel and combat shot. Nothing else on the list touches as many frames.
+| Area | Evidence |
+|---|---|
+| **Performance** | 7.9ms at cinematic 1920×1080 on an RTX 5090 (≈127fps). 58–62fps across all 13 canonical views |
+| **Shadows** | Cast shadows resolve at every sun angle including grazing low sun; pipework reads *as pipework*, catwalk grating casts a true per-bar lattice |
+| **Ambient occlusion** | Present and correctly scoped — ambient term only, so sunlit corners are not smeared |
+| **Warm-up** | Peak first-minute CPU hitch 742.6ms → **32.5ms**; 175 shader programs pre-linked before ready |
+| **Gunplay** | Frame-rate-independent fire control, learnable recoil patterns, spread state machine with first-shot accuracy |
+| **Ballistics** | Energy-based penetration with back-face thickness probing — 5.56 defeats a 50mm plank and a 300mm sandbag, stops on 50mm concrete |
+| **Weapons** | Three distinct rigs swapped on 1/2/3 — WRAITH-9 SMG (20,178 tris), VK-7 rifle (21,672), LANCET marksman (26,192) |
+| **Grenades** | Cook, arc, bounce, LOS-checked blast. Verified: count 3→2, one explosion at 6.2m radius, 128 damage |
+| **Traversal** | 17 of 20 asserted routes. Main stair tower climbs 4.69m and descends 5.06m; ladders climb (perimeter +6.58m, silo +22.13m); dock fire stair, crate-climb mantle route and catwalk ring all pass |
+| **Audio** | Fully synthesised WebAudio — layered gunshots, distance low-pass and delay, convolution reverb per zone |
+| **Playability** | `playtest.mjs` 17/17 — movement, jump, gravity, firing, impacts, reload, weapon switch, no page errors |
+
+**Scale:** 164 modules, 59,389 lines, 25 verification tools, zero external assets.
+
+---
 
 ## Open defects
 
-### Critical
+### Blocking a higher score
 
-| System | Defect | Fix |
+| System | Defect | Note |
 |---|---|---|
-| lighting | Zero cast shadows in all low-sun views (`hero-golden`, `hero-dusk`, `silhouette-dusk`, `viewmodel-hip`, `viewmodel-ads`, `material-closeup`, `combat`) | Refit shadow camera light-space AABB per frame, extents scaled by `1/tan(sunElevation)` |
-| lighting | No ambient occlusion in any frame — third review running. `hero-overcast` is the proof: under pure ambient, nothing has crevice darkening; barrels, blocks and column footings meet the floor with a crisp bright seam | Verify the AO buffer in isolation, then composite against the **diffuse ambient term only** |
-| viewmodel | No hands or arms — the rifle floats detached in the lower-right corner with nothing gripping it | Model and skin gloved hands to the grip and handguard |
-| viewmodel | ADS optic is a hollow rectangle with sharp corners, no lens glass, no coating tint, no tube vignette, no turrets or mount | Rebuild as a real 1× red dot: tinted objective, AR coating gradient, knurled turrets, rubber eyecup |
+| **lighting** | The **night preset is sunset lighting with a night sky swapped in** — a warm directional casts hard parallel shadows under a starfield, materials render at daytime albedo. Scores 44, the worst frame by 8 points | Never fixed; the agent assigned to it died on a session limit |
+| **lighting** | `hero-overcast` models overcast as "sun turned down" rather than sky-dome-dominant, so a directional key still casts shadows under a flat grey sky | |
+| **props** | **Floating rusted plates — eight rounds unresolved.** Present in most views. Now more visible, because the new shadow pass casts a shadow from a plate that is attached to nothing | The repeated failures suggest the approach is wrong; a *detector* was specified but never delivered |
+| **level/props** | Large featureless floor and wall expanses. The reviewer's `singleBiggestGap` at round 10: a surface-story pass (dirt gradient at wall bases, 15–25 decals per 100m², cracking, near-field scatter) — it touches all 13 shots | |
+| **fx** | Shell casings ~25× true scale, spawning 25–40m downrange. **Diagnosis unresolved:** the effect sets `E.size(0.051)` which is *correct* for a 5.56 case, so this may be a depth misattribution by the reviewer rather than a scale bug. Settle it by reading live particle positions from `ParticleBatch` before changing anything | |
+| **ai** | Combatants: only two poses across ~10 figures, no hands (arms terminate at the weapon), inconsistent contact shadows | |
+| **viewmodel** | Glove reads as smooth/waxy in places; the ADS optic still lacks eyecup and lens hood | |
 
-### Major
+### Known-failing assertions — deliberately left red
 
-| System | Defect |
+These fail on purpose. **Do not relax a threshold to make one pass** — gaming an
+assertion is the exact failure mode this project spent eleven rounds fighting.
+
+| Assertion | State |
 |---|---|
-| props | Floating rust-coloured plate present in every hero view, plus 3 more above the gantry in `material-closeup` and 4+ in `combat`. Raised twice, zero progress |
-| props | Sandbag walls read as one uniform moulded beige mass with three vague lumps — no bag boundaries, seams, weave or sag |
-| lighting | Environment metal specular clipping to pure 255 white over large continuous areas (pipe tops, railing edges in `interior` and `vertical`) — destroys form more severely than the original sparkle |
-| lighting | Night practicals emit glow and bloom but cast no light pools on the ground or their own mounting surfaces |
-| fx | Muzzle flash is a single flat six-pointed billboard contributing zero light to the weapon, ground or adjacent geometry |
-| fx | Shell casings eject into open sky far from the ejection port and are roughly as wide as the magazine |
-| ai | Combatants stand in byte-identical poses — straight unbent legs, no stance width, no foot contact, no shadow, arms terminating at the weapon with no hands. Two agents co-located and intersecting in `viewmodel-ads` |
-| ai | Night combatant lit as though in full daylight while every surface around it sits in deep night blue |
-| level | Cooling towers — the largest structures in five frames — are completely untextured smooth grey hyperboloids |
-| level | Large uniform featureless expanses persist; `silhouette-dusk` gives ~40% of frame to a blank panel-grid wall |
+| `handcheck.mjs` — NO TEAL RINGS | Hipfire **passes** (peak saturation 0.284 vs 0.34). **ADS fails** at 0.353 on 0.144% of hand pixels. The cyan comes from the darkest pixels lit only by the blue sky probe; directional desaturation cannot reach them |
+| `traversal.mjs` | **17 of 20 routes pass.** Failing: plant deck switchback stair, west hall mezzanine stair, admin block stair tower — all three are stairs that never gain height, so they are blocked rather than merely awkward. Separately, the suite's keep-clear audit reports the crate-climb ramp **blocked by a Props cinder block**: that route still passes, but Props is scattering into `level.keepClear` and must subtract it |
 
-### Minor
+### Performance caveats
 
-- **postfx** — no depth of field in ADS; the background renders as sharply as the optic 20cm from the eye.
-- **sky** — clouds in `hero-midday` are hard-edged solid white shapes with no internal density variation.
+- **Worst-frame time 35–50ms against a 16.7ms mean, in every view.** A persistent ~2× spike that reads as micro-stutter in motion. Not warm-up — that was fixed separately. Never diagnosed. The new FPS counter (F3) surfaces it as `WORST`.
+- **Triangles now exceed the 3.5M budget**, peaking at 4.46M in `combat`. Framerate holds on an RTX 5090; it would not on weaker hardware.
 
-## Resolved this round
+---
 
-- **ADS picture-in-picture regression** — the optic previously rendered as an opaque
-  box containing a separate zoomed render. Now genuinely see-through with the dot
-  composited in world space. (A red dot is a 1× optic, so a render-target scope
-  was the wrong technique entirely.)
-- **Combat performance** — 28fps → 59fps. All 12 views now 59–60fps.
-- **NaN geometry errors** — were 3 per frame, now zero.
-- **Specular sparkle on the weapon** — substantially resolved via roughness
-  regularisation; the receiver is now stable dark blue-grey.
+## The measurement problem — read before trusting any number
 
-## A correction to the review
+Three times in this project a confident conclusion was wrong because the
+*instrument* was wrong, not the code. This is the single most important thing to
+carry forward.
 
-The reviewer reported "no HUD in any of the twelve captures" and raised it as a
-major finding. **This is a rig artifact, not a missing feature.** `shoot.mjs`
-passed `hud=0` on every view, so the HUD was never photographed. It exists and is
-implemented — compass ribbon, vitals block, ammo readout with fire mode and
-weapon identity (see `docs/screenshots/05-round6-hud.png`).
+1. **"60fps" during 167ms frames.** The FPS counter derived from a simulation
+   `dt` clamped to `0.1s`, so it structurally could not read below 10fps. And
+   `stats.ms` timed only JavaScript — GPU work is asynchronous, so it read ~2ms
+   while the GPU took 167ms. That second number is what justified telling twelve
+   agents they had "13ms of headroom to spend".
+2. **"No hands" for three rounds.** They were present, rendering, and 28%
+   occluded — but the same dark value as the weapon, so they read as gun parts.
+   The fix was contrast, not geometry. Three rounds solved the wrong problem.
+3. **"No ambient occlusion" across three reviews** while an AO pass existed. It
+   only landed when an agent rendered the AO buffer *in isolation* and looked at it.
 
-A dedicated `hud` view has been added to the rig so this cannot recur. It is
-worth noting as a general lesson: **the measurement apparatus is part of the
-system under test**, and a blind spot in the rig becomes a false finding in the
-review.
+And two blind spots in the test rigs themselves:
 
-## Performance (round 6, 1920×1080, cinematic preset)
+4. **The critic reported "there is no HUD"** — because `shoot.mjs` passed `hud=0`
+   on every view. The HUD existed and was well built.
+5. **`traversal.mjs` reported traversal fixed while ladders were unclimbable** —
+   it had 18 routes covering stairs, ramps and mantles, and not one ladder. The
+   suite built to catch "I can't get off the ground floor" had the same blind
+   spot as the level.
 
-All views 59–60fps, zero page errors.
+**Headless Chromium has no swap chain**, so `requestAnimationFrame` runs on a
+virtual 60Hz clock and reports a flat 16.7ms regardless of GPU load. Use
+`tools/gpuprobe.mjs`, which forces a pipeline flush, for anything performance
+related. Never `stats().fps`, never rAF intervals.
 
-| View | FPS | Draws | Triangles |
-|---|---:|---:|---:|
-| hero-golden | 59 | 535 | 2.27M |
-| hero-midday | 59 | 530 | 2.24M |
-| hero-dusk | 59 | 534 | 2.25M |
-| hero-overcast | 60 | 530 | 2.22M |
-| interior | 60 | 556 | 2.92M |
-| material-closeup | 59 | 526 | 2.33M |
-| viewmodel-hip | 60 | 544 | 2.29M |
-| viewmodel-ads | 60 | 753 | 3.14M |
-| silhouette-dusk | 60 | 669 | 2.86M |
-| vertical | 60 | 619 | 3.01M |
-| night | 60 | 518 | 2.27M |
-| combat | 59 | 830 | 3.50M |
+---
 
-Headroom exists — frame time is well inside the 16.6ms budget — so the remaining
-defects are correctness and art problems, not performance trade-offs.
+## Where the ceiling is
+
+Reaching ~75 looks achievable with the open defects above — night lighting,
+surface story, floating props, AI figures. Past that, two constraints bind:
+
+1. **Hero assets.** The reviewer's prescription for the hand was *"weights on a
+   standard 15-bone hand rig, a glove material with stitched seams, knuckle
+   pads"* — that describes an authored asset. Procedural generation does concrete
+   and rust extremely well and hero objects poorly, and the weapon is 20–25% of
+   every gameplay pixel. Dropping the zero-external-assets rule *for the weapon
+   and hands specifically* is the highest-leverage change available.
+2. **WebGL2.** No compute shaders, no mesh shaders, no hardware ray tracing. No
+   Lumen or Nanite equivalent exists to reach for. WebGPU would unlock real GI,
+   clustered lighting and GPU culling, at the cost of re-architecting the render
+   layer — gameplay, ballistics, AI and level systems would carry over unchanged.
+
+85+ ("mistakable for AAA at a glance") is not reachable under the current
+constraints, and no amount of further iteration changes that.

@@ -6,9 +6,10 @@ A first-person shooter built in Three.js / WebGL2, with **zero external assets**
 every texture, mesh, animation and sound is generated procedurally in code at
 load time. No downloaded models, no sample libraries, no licensing surface.
 
-> **First load takes 30–60 seconds.** Roughly 115 shader programs compile from
-> cold, and every texture in the game is generated at load time rather than
-> downloaded. Subsequent loads are much faster once the shader cache is warm.
+> **First load takes 30–60 seconds.** Roughly 175 shader programs are compiled up
+> front — deliberately, behind the boot screen — and every texture is generated
+> rather than downloaded. That pre-warm is what stops the first minute of play
+> being a series of 700ms stalls. Subsequent loads are faster once the cache is warm.
 > Needs a desktop browser with WebGL2 — Chrome or Edge give the best results.
 > Click the canvas to capture the mouse; press Esc to release it.
 
@@ -19,41 +20,37 @@ load time. No downloaded models, no sample libraries, no licensing surface.
 ## Status: honest version
 
 The stated goal was "Call of Duty quality". **It is not there.** The most recent
-independent visual review scored it **54/100 — NOT_AAA**, up from 9/100 at the
-first blockout and 32/100 mid-way.
+graded review scored it **61/100**, up from 9 at the first blockout.
 
-What that score means in practice: the environment art, material authoring and
-prop dressing hold up respectably, but the **lighting fundamentals are broken** —
-seven of twelve captured frames are golden hour or dusk with *zero cast shadows
-on the ground*, and ambient occlusion has never landed. Those two things read as
-wrong instantly, and no amount of texture work compensates.
+What that means in practice: the environment art, material authoring and lighting
+now hold up respectably — the reviewer's per-shot scores put environment-only
+frames at 60–68 — but the first-person weapon sits at 42–54 and the night preset
+at 44. Hero assets are where a strictly procedural approach hits its ceiling.
 
 See [docs/Status.md](docs/Status.md) for the full review, every open defect, and
-the prioritised fix list.
+the measurement problems that repeatedly produced confident wrong answers.
 
 ### What genuinely works
 
 | | |
 |---|---|
-| **Performance** | 59–60fps at 1920×1080 across all 12 canonical views, 518–830 draw calls, ≤3.5M triangles, zero page errors |
-| **Materials** | Procedural PBR with panel joints, form-tie recesses, rust masks driven by crevice/up-facing terms, Toksvig roughness regularisation |
-| **Ballistics** | Energy-based penetration with back-face thickness probing — 5.56 defeats a 50mm plank and a 300mm sandbag, stops on 50mm concrete |
-| **Gunplay** | Frame-rate-independent fire accumulator, learnable deterministic recoil patterns, spread state machine with first-shot accuracy |
-| **Atmosphere** | Rayleigh/Mie scattering, cloud layers, seven art-directed time-of-day presets, aerial perspective |
-| **Audio** | Fully synthesised WebAudio — layered gunshots (transient/body/mechanical/tail), distance low-pass and delay, convolution reverb |
-| **HUD** | Compass ribbon, vitals, ammo block with fire mode and weapon identity |
+| **Performance** | 7.9ms at cinematic 1920×1080 on an RTX 5090 (~127fps); 58–62fps across all 13 canonical views |
+| **Lighting** | Cast shadows at every sun angle including grazing low sun; ambient occlusion correctly scoped to the ambient term |
+| **Warm-up** | Peak first-minute CPU hitch cut from 742ms to 32ms by pre-linking 175 shader programs behind the boot screen |
+| **Ballistics** | Energy-based penetration with back-face thickness probing — 5.56 defeats a 50mm plank, stops on 50mm concrete |
+| **Weapons** | Three distinct rigs on 1/2/3: compact SMG, rifle, marksman rifle |
+| **Grenades** | Cook, arc, bounce, line-of-sight-checked blast |
+| **Traversal** | Stairs, ramps, mantles and caged ladders, up and down — 17 of 20 asserted routes |
+| **Audio** | Fully synthesised WebAudio: layered gunshots, distance filtering, convolution reverb per zone |
+| **HUD** | Compass, vitals, ammo with fire mode, kill feed, grenade count, F3 perf readout |
 
 ### What is broken
 
-- **No cast shadows at low sun elevation** — the shadow camera's ortho extents are
-  sized for a high sun and clip long shadows away entirely. Affects 7 of 12 views.
-- **No ambient occlusion in any frame** — raised in three consecutive reviews.
-- **No hands on the weapon** — the rifle floats detached in the lower right.
-- **Floating props** — a rust-coloured plate is suspended in mid-air in most views.
-- **Untextured cooling towers** — the largest structures in five frames are smooth
-  grey hyperboloids.
-
----
+- **Night preset is sunset lighting with a night sky swapped in** — a warm directional casts hard shadows under a starfield. Worst frame at 44.
+- **Floating props** — eight rounds unresolved.
+- **Large featureless floor and wall expanses** — the reviewer's highest-leverage remaining fix.
+- **Worst-frame spikes** of 35–50ms against a 16.7ms mean, never diagnosed.
+- Three stairs remain unclimbable (plant deck switchback, west hall mezzanine, admin block tower), and Props scatters into a keep-clear volume.
 
 ## Quick start
 
@@ -65,7 +62,8 @@ npm run dev
 Then open <http://127.0.0.1:5180>. Click to capture the pointer.
 
 **Controls** — WASD move · Shift sprint · Ctrl/C crouch · Space jump · Left click
-fire · Right click ADS · R reload · B fire mode · 1/2/3 weapon · Q/E lean · Esc pause.
+fire · Right click ADS · R reload · B fire mode · **1/2/3 weapons** · **G grenade** ·
+Q/E lean · **F3 perf readout** · Esc pause. Ladders: face one and hold W.
 
 ## The screenshot rig
 
@@ -116,9 +114,10 @@ registry and a frozen event bus.
 ## Documentation
 
 - **[docs/Resuming.md](docs/Resuming.md)** — start here if you are picking this up cold
-- **[CONTRACT.md](CONTRACT.md)** — the binding rules for working in this codebase
+- **[docs/Status.md](docs/Status.md)** — full review, open defects, and the measurement problem
 - **[docs/Architecture.md](docs/Architecture.md)** — runtime topology, systems, seams
-- **[docs/Status.md](docs/Status.md)** — full review, open defects, fix priority
+- **[docs/VR.md](docs/VR.md)** — the WebXR port plan: obstacles, phase order, testing
+- **[CONTRACT.md](CONTRACT.md)** — the binding rules for working in this codebase
 - **[tools/workflows/](tools/workflows/)** — the agent briefs and critic prompts that built it
 
 ## Constraints
